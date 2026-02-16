@@ -23,11 +23,11 @@ async fn main() -> Result<()> {
 
     match cli.command {
         None => cmd_interactive().await?,
-        Some(Command::Save) => cmd_save()?,
+        Some(Command::Save { tool, profile }) => cmd_save(tool, profile)?,
         Some(Command::Usage) => cmd_usage().await?,
         Some(Command::List) => cmd_list()?,
         Some(Command::Current) => cmd_current()?,
-        Some(Command::Delete) => cmd_delete()?,
+        Some(Command::Delete { tool, profile }) => cmd_delete(tool, profile)?,
         Some(Command::Switch { tool, profile }) => {
             let tool: Tool = tool.parse()?;
             cmd_switch(tool, &profile)?;
@@ -256,10 +256,16 @@ fn select_profile_with_usage(
     }
 }
 
-fn cmd_save() -> Result<()> {
-    let tool = select_tool()?;
+fn cmd_save(tool_arg: Option<String>, profile_arg: Option<String>) -> Result<()> {
+    let tool = match tool_arg {
+        Some(t) => t.parse()?,
+        None => select_tool()?,
+    };
 
-    let name: String = Input::new().with_prompt("Profile name").interact_text()?;
+    let name = match profile_arg {
+        Some(p) => p,
+        None => Input::new().with_prompt("Profile name").interact_text()?,
+    };
 
     match tool {
         Tool::Claude => claude::profile::save(&name)?,
@@ -394,9 +400,16 @@ fn cmd_switch(tool: Tool, profile: &str) -> Result<()> {
     Ok(())
 }
 
-fn cmd_delete() -> Result<()> {
-    let tool = select_tool()?;
-    let profile = select_profile(tool)?;
+fn cmd_delete(tool_arg: Option<String>, profile_arg: Option<String>) -> Result<()> {
+    let tool: Tool = match tool_arg {
+        Some(t) => t.parse()?,
+        None => select_tool()?,
+    };
+
+    let profile = match profile_arg {
+        Some(p) => p,
+        None => select_profile(tool)?,
+    };
 
     if !Confirm::new()
         .with_prompt(format!("Delete profile '{}' for {}?", profile, tool))

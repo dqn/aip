@@ -10,7 +10,12 @@ pub struct Cli {
 #[derive(Subcommand)]
 pub enum Command {
     /// Save current credentials as a new profile
-    Save,
+    Save {
+        /// Tool name (claude or codex)
+        tool: Option<String>,
+        /// Profile name
+        profile: Option<String>,
+    },
     /// Show usage for all tools
     Usage,
     /// List all profiles
@@ -18,7 +23,12 @@ pub enum Command {
     /// Show current profile for each tool
     Current,
     /// Delete a profile
-    Delete,
+    Delete {
+        /// Tool name (claude or codex)
+        tool: Option<String>,
+        /// Profile name
+        profile: Option<String>,
+    },
     /// Switch profile (non-interactive)
     Switch {
         /// Tool name (claude or codex)
