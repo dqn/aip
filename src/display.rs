@@ -2,6 +2,11 @@ use chrono::{DateTime, Local, Utc};
 
 const BAR_WIDTH: usize = 20;
 
+pub enum DisplayMode {
+    Used,
+    Left,
+}
+
 pub fn render_bar(percent: f64) -> String {
     let filled = ((percent / 100.0) * BAR_WIDTH as f64).round() as usize;
     let filled = filled.min(BAR_WIDTH);
@@ -9,12 +14,22 @@ pub fn render_bar(percent: f64) -> String {
     "\u{2588}".repeat(filled) + &"\u{2591}".repeat(empty)
 }
 
-pub fn format_usage_line(label: &str, percent: f64, resets_at: DateTime<Utc>) -> String {
+pub fn format_usage_line(
+    label: &str,
+    percent: f64,
+    resets_at: DateTime<Utc>,
+    mode: &DisplayMode,
+) -> String {
+    let (display_percent, mode_label) = match mode {
+        DisplayMode::Used => (percent, "used"),
+        DisplayMode::Left => (100.0 - percent, "left"),
+    };
     format!(
-        "{}  {}  {:>5.1}%  resets at {}",
+        "{}  {}  {:>5.1}% {}  resets at {}",
         label,
-        render_bar(percent),
-        percent,
+        render_bar(display_percent),
+        display_percent,
+        mode_label,
         format_reset_time(resets_at),
     )
 }

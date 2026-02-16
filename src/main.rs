@@ -14,7 +14,7 @@ use console::{Key, Term};
 use dialoguer::{Confirm, Input, Select};
 
 use cli::{Cli, Command};
-use display::{format_reset_time, format_usage_line, render_bar};
+use display::{DisplayMode, format_usage_line};
 use tool::Tool;
 
 #[tokio::main]
@@ -126,11 +126,13 @@ async fn prefetch_claude_usage() -> HashMap<String, Vec<String>> {
                             "5-hour",
                             usage.five_hour.utilization,
                             usage.five_hour.resets_at,
+                            &DisplayMode::Used,
                         ),
                         format_usage_line(
                             "Weekly",
                             usage.seven_day.utilization,
                             usage.seven_day.resets_at,
+                            &DisplayMode::Used,
                         ),
                     ]
                 }
@@ -156,6 +158,7 @@ fn prefetch_codex_usage(profiles: &[String]) -> HashMap<String, Vec<String>> {
                                 "5-hour",
                                 primary.used_percent,
                                 primary.resets_at_utc(),
+                                &DisplayMode::Left,
                             ));
                         }
                         if let Some(secondary) = &limits.secondary {
@@ -163,6 +166,7 @@ fn prefetch_codex_usage(profiles: &[String]) -> HashMap<String, Vec<String>> {
                                 "Weekly",
                                 secondary.used_percent,
                                 secondary.resets_at_utc(),
+                                &DisplayMode::Left,
                             ));
                         }
                         if lines.is_empty() {
@@ -305,16 +309,22 @@ async fn print_claude_usage(label: &str) {
             };
             println!("{}{}", label, suffix);
             println!(
-                "  5-hour  {}  {:>5.1}%  resets at {}",
-                render_bar(usage.five_hour.utilization),
-                usage.five_hour.utilization,
-                format_reset_time(usage.five_hour.resets_at),
+                "  {}",
+                format_usage_line(
+                    "5-hour",
+                    usage.five_hour.utilization,
+                    usage.five_hour.resets_at,
+                    &DisplayMode::Used,
+                )
             );
             println!(
-                "  Weekly  {}  {:>5.1}%  resets at {}",
-                render_bar(usage.seven_day.utilization),
-                usage.seven_day.utilization,
-                format_reset_time(usage.seven_day.resets_at),
+                "  {}",
+                format_usage_line(
+                    "Weekly",
+                    usage.seven_day.utilization,
+                    usage.seven_day.resets_at,
+                    &DisplayMode::Used,
+                )
             );
         }
         Err(e) => {
@@ -331,18 +341,24 @@ fn print_codex_usage(label: &str) {
             println!("{}", label);
             if let Some(primary) = &limits.primary {
                 println!(
-                    "  5-hour  {}  {:>5.1}%  resets at {}",
-                    render_bar(primary.used_percent),
-                    primary.used_percent,
-                    format_reset_time(primary.resets_at_utc()),
+                    "  {}",
+                    format_usage_line(
+                        "5-hour",
+                        primary.used_percent,
+                        primary.resets_at_utc(),
+                        &DisplayMode::Left,
+                    )
                 );
             }
             if let Some(secondary) = &limits.secondary {
                 println!(
-                    "  Weekly  {}  {:>5.1}%  resets at {}",
-                    render_bar(secondary.used_percent),
-                    secondary.used_percent,
-                    format_reset_time(secondary.resets_at_utc()),
+                    "  {}",
+                    format_usage_line(
+                        "Weekly",
+                        secondary.used_percent,
+                        secondary.resets_at_utc(),
+                        &DisplayMode::Left,
+                    )
                 );
             }
         }
