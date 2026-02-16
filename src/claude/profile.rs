@@ -2,6 +2,7 @@ use std::fs;
 
 use anyhow::{Result, anyhow};
 
+use super::keychain;
 use crate::tool::Tool;
 
 const TOOL: Tool = Tool::Claude;
@@ -11,30 +12,31 @@ pub fn switch(profile: &str) -> Result<()> {
     if !profile_dir.exists() {
         return Err(anyhow!("profile '{}' does not exist for {}", profile, TOOL));
     }
+
+    // Load profile credentials into keychain
+    let creds_path = profile_dir.join("credentials.json");
+    if creds_path.exists() {
+        let content = fs::read_to_string(&creds_path)?;
+        let value: serde_json::Value = serde_json::from_str(&content)?;
+        keychain::write(&value)?;
+    }
+
     fs::write(TOOL.current_file()?, format!("{}\n", profile))?;
     Ok(())
 }
 
 pub fn save(name: &str) -> Result<()> {
-    let current = TOOL
-        .current_profile()?
-        .ok_or_else(|| anyhow!("no current profile set for {}", TOOL))?;
-
-    let src = TOOL.profile_dir(&current)?.join("credentials.json");
-    if !src.exists() {
-        return Err(anyhow!(
-            "credentials.json not found in current profile '{}'",
-            current
-        ));
-    }
-
     let dest_dir = TOOL.profile_dir(name)?;
     if dest_dir.exists() {
         return Err(anyhow!("profile '{}' already exists for {}", name, TOOL));
     }
 
+    // Read current credentials from keychain
+    let creds = keychain::read()?;
+    let json = serde_json::to_string_pretty(&creds)?;
+
     fs::create_dir_all(&dest_dir)?;
-    fs::copy(&src, dest_dir.join("credentials.json"))?;
+    fs::write(dest_dir.join("credentials.json"), json)?;
     Ok(())
 }
 

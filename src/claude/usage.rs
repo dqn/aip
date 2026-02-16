@@ -1,11 +1,9 @@
-use std::path::PathBuf;
-
 use anyhow::{Result, anyhow};
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use serde_json::Value;
 
-use crate::tool::Tool;
+use super::keychain;
 
 const CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
 const TOKEN_URL: &str = "https://console.anthropic.com/v1/oauth/token";
@@ -47,13 +45,6 @@ pub struct ProfileInfo {
     #[allow(dead_code)]
     pub organization_name: Option<String>,
     pub plan_type: Option<String>,
-}
-
-fn creds_path() -> Result<PathBuf> {
-    let current = Tool::Claude
-        .current_profile()?
-        .ok_or_else(|| anyhow!("no current profile set for Claude Code"))?;
-    Ok(Tool::Claude.profile_dir(&current)?.join("credentials.json"))
 }
 
 fn read_oauth(raw: &Value) -> Result<OAuthData> {
@@ -102,7 +93,7 @@ async fn refresh_token(oauth: &OAuthData) -> Result<TokenResponse> {
     Ok(resp.json().await?)
 }
 
-fn update_credentials(path: &PathBuf, raw: &mut Value, token_resp: &TokenResponse) {
+fn apply_token_response(raw: &mut Value, token_resp: &TokenResponse) {
     if let Some(oauth) = raw.get_mut("claudeAiOauth") {
         oauth["accessToken"] = Value::String(token_resp.access_token.clone());
         if let Some(new_refresh) = &token_resp.refresh_token {
@@ -112,14 +103,10 @@ fn update_credentials(path: &PathBuf, raw: &mut Value, token_resp: &TokenRespons
         let new_expires_at = Utc::now().timestamp_millis() as u64 + expires_in * 1000;
         oauth["expiresAt"] = Value::Number(new_expires_at.into());
     }
-    // Best-effort write; ignore errors
-    let _ = std::fs::write(path, serde_json::to_string_pretty(raw).unwrap_or_default());
 }
 
 async fn get_access_token() -> Result<(String, ProfileInfo)> {
-    let path = creds_path()?;
-    let content = std::fs::read_to_string(&path)?;
-    let mut raw: Value = serde_json::from_str(&content)?;
+    let mut raw = keychain::read()?;
     let oauth = read_oauth(&raw)?;
 
     let info = ProfileInfo {
@@ -134,7 +121,8 @@ async fn get_access_token() -> Result<(String, ProfileInfo)> {
     // Token expired, refresh it
     let token_resp = refresh_token(&oauth).await?;
     let access_token = token_resp.access_token.clone();
-    update_credentials(&path, &mut raw, &token_resp);
+    apply_token_response(&mut raw, &token_resp);
+    keychain::write(&raw)?;
 
     Ok((access_token, info))
 }
