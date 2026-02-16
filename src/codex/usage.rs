@@ -9,6 +9,11 @@ use crate::tool::Tool;
 
 #[derive(Debug, Deserialize)]
 struct SessionEntry {
+    payload: Option<SessionPayload>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SessionPayload {
     rate_limits: Option<RateLimits>,
 }
 
@@ -85,7 +90,8 @@ fn read_rate_limits_from_tail(path: &PathBuf) -> Result<Option<RateLimits>> {
             continue;
         }
         if let Ok(entry) = serde_json::from_str::<SessionEntry>(line)
-            && let Some(limits) = entry.rate_limits
+            && let Some(payload) = entry.payload
+            && let Some(limits) = payload.rate_limits
         {
             return Ok(Some(limits));
         }
