@@ -42,7 +42,22 @@ fn sync_auth_to_current_profile() {
         _ => return,
     };
     if src.exists() && dest.exists() {
-        let _ = fs::copy(&src, &dest);
+        let src_bytes = match fs::read(&src) {
+            Ok(b) => b,
+            _ => return,
+        };
+        let dest_bytes = match fs::read(&dest) {
+            Ok(b) => b,
+            _ => return,
+        };
+        if src_bytes != dest_bytes {
+            eprintln!(
+                "Warning: Current auth.json differs from profile '{}'.",
+                current,
+            );
+            eprintln!("Skipping sync to protect stored credentials.");
+            eprintln!("Run 'aip login' to re-authenticate and save to the correct profile.");
+        }
     }
 }
 
@@ -57,6 +72,18 @@ pub fn save(name: &str) -> Result<()> {
         return Err(anyhow!("profile '{}' already exists for {}", name, TOOL));
     }
 
+    fs::create_dir_all(&dest_dir)?;
+    fs::copy(&src, dest_dir.join("auth.json"))?;
+    Ok(())
+}
+
+pub fn update(name: &str) -> Result<()> {
+    let src = TOOL.home_dir()?.join("auth.json");
+    if !src.exists() {
+        return Err(anyhow!("auth.json not found in {}", TOOL));
+    }
+
+    let dest_dir = TOOL.profile_dir(name)?;
     fs::create_dir_all(&dest_dir)?;
     fs::copy(&src, dest_dir.join("auth.json"))?;
     Ok(())

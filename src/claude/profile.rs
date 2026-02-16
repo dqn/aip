@@ -40,11 +40,42 @@ fn sync_keychain_to_current_profile() {
     if !creds_path.exists() {
         return;
     }
-    let value = match keychain::read() {
+    let keychain_value = match keychain::read() {
         Ok(v) => v,
         _ => return,
     };
-    let json = match serde_json::to_string_pretty(&value) {
+
+    // Compare organizationName to detect account mismatch
+    let stored_value: serde_json::Value = match fs::read_to_string(&creds_path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+    {
+        Some(v) => v,
+        None => serde_json::Value::Null,
+    };
+
+    let keychain_org = keychain_value
+        .get("claudeAiOauth")
+        .and_then(|o| o.get("organizationName"))
+        .and_then(|v| v.as_str());
+    let stored_org = stored_value
+        .get("claudeAiOauth")
+        .and_then(|o| o.get("organizationName"))
+        .and_then(|v| v.as_str());
+
+    if let (Some(k_org), Some(s_org)) = (keychain_org, stored_org)
+        && k_org != s_org
+    {
+        eprintln!(
+            "Warning: Current credentials (org: '{}') differ from profile '{}' (org: '{}').",
+            k_org, current, s_org,
+        );
+        eprintln!("Skipping sync to protect stored credentials.");
+        eprintln!("Run 'aip login' to re-authenticate and save to the correct profile.");
+        return;
+    }
+
+    let json = match serde_json::to_string_pretty(&keychain_value) {
         Ok(j) => j,
         _ => return,
     };
@@ -58,6 +89,16 @@ pub fn save(name: &str) -> Result<()> {
     }
 
     // Read current credentials from keychain
+    let creds = keychain::read()?;
+    let json = serde_json::to_string_pretty(&creds)?;
+
+    fs::create_dir_all(&dest_dir)?;
+    fs::write(dest_dir.join("credentials.json"), json)?;
+    Ok(())
+}
+
+pub fn update(name: &str) -> Result<()> {
+    let dest_dir = TOOL.profile_dir(name)?;
     let creds = keychain::read()?;
     let json = serde_json::to_string_pretty(&creds)?;
 
