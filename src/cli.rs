@@ -26,4 +26,6 @@ pub enum Command {
         /// Profile name
         profile: String,
     },
+    /// Log in and save credentials to a profile
+    Login,
 }

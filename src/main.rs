@@ -5,8 +5,10 @@ mod display;
 mod tool;
 
 use std::collections::HashMap;
+use std::fs;
+use std::process::Command as ProcessCommand;
 
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use clap::Parser;
 use console::{Key, Term};
 use dialoguer::{Confirm, Input, Select};
@@ -30,6 +32,7 @@ async fn main() -> Result<()> {
             let tool: Tool = tool.parse()?;
             cmd_switch(tool, &profile)?;
         }
+        Some(Command::Login) => cmd_login()?,
     }
 
     Ok(())
@@ -410,5 +413,51 @@ fn cmd_delete() -> Result<()> {
     }
 
     println!("Deleted profile '{}' for {}", profile, tool);
+    Ok(())
+}
+
+fn select_or_create_profile(tool: Tool) -> Result<String> {
+    let mut profiles = tool.list_profiles()?;
+    let create_label = "[Create new profile]";
+    let mut items: Vec<&str> = profiles.iter().map(|s| s.as_str()).collect();
+    items.push(create_label);
+
+    let selection = Select::new()
+        .with_prompt("Select profile to save credentials")
+        .items(&items)
+        .default(0)
+        .interact()?;
+
+    if selection == profiles.len() {
+        let name: String = Input::new().with_prompt("Profile name").interact_text()?;
+        profiles.push(name.clone());
+        Ok(name)
+    } else {
+        Ok(profiles[selection].clone())
+    }
+}
+
+fn cmd_login() -> Result<()> {
+    let tool = select_tool()?;
+    let profile = select_or_create_profile(tool)?;
+
+    let status = match tool {
+        Tool::Claude => ProcessCommand::new("claude")
+            .args(["auth", "login"])
+            .status()?,
+        Tool::Codex => ProcessCommand::new("codex").arg("login").status()?,
+    };
+    if !status.success() {
+        return Err(anyhow!("login command failed"));
+    }
+
+    match tool {
+        Tool::Claude => claude::profile::update(&profile)?,
+        Tool::Codex => codex::profile::update(&profile)?,
+    }
+
+    fs::write(tool.current_file()?, format!("{}\n", profile))?;
+
+    println!("Saved credentials to profile '{}' for {}", profile, tool);
     Ok(())
 }
