@@ -145,12 +145,17 @@ async fn prefetch_claude_usage() -> HashMap<String, Vec<String>> {
 
 fn prefetch_codex_usage(profiles: &[String]) -> HashMap<String, Vec<String>> {
     let current = Tool::Codex.current_profile().ok().flatten();
+    let since = Tool::Codex
+        .current_file()
+        .ok()
+        .and_then(|p| p.metadata().ok())
+        .and_then(|m| m.modified().ok());
 
     profiles
         .iter()
         .map(|p| {
             let lines = if current.as_deref() == Some(p.as_str()) {
-                match codex::usage::fetch_usage() {
+                match codex::usage::fetch_usage(since) {
                     Ok(Some(limits)) => {
                         let mut lines = Vec::new();
                         if let Some(primary) = &limits.primary {
@@ -336,7 +341,13 @@ async fn print_claude_usage(label: &str) {
 }
 
 fn print_codex_usage(label: &str) {
-    match codex::usage::fetch_usage() {
+    let since = Tool::Codex
+        .current_file()
+        .ok()
+        .and_then(|p| p.metadata().ok())
+        .and_then(|m| m.modified().ok());
+
+    match codex::usage::fetch_usage(since) {
         Ok(Some(limits)) => {
             println!("{}", label);
             if let Some(primary) = &limits.primary {
