@@ -139,35 +139,43 @@ async fn prefetch_claude_usage() -> HashMap<String, Vec<String>> {
 }
 
 fn prefetch_codex_usage(profiles: &[String]) -> HashMap<String, Vec<String>> {
-    let lines = match codex::usage::fetch_usage() {
-        Ok(Some(limits)) => {
-            let mut lines = Vec::new();
-            if let Some(primary) = &limits.primary {
-                lines.push(format_usage_line(
-                    "5-hour",
-                    primary.used_percent,
-                    primary.resets_at_utc(),
-                ));
-            }
-            if let Some(secondary) = &limits.secondary {
-                lines.push(format_usage_line(
-                    "Weekly",
-                    secondary.used_percent,
-                    secondary.resets_at_utc(),
-                ));
-            }
-            if lines.is_empty() {
-                vec!["No usage data available".to_string()]
-            } else {
-                lines
-            }
-        }
-        Ok(None) => vec!["No usage data available".to_string()],
-        Err(e) => vec![format!("Error: {}", e)],
-    };
+    let current = Tool::Codex.current_profile().ok().flatten();
+
     profiles
         .iter()
-        .map(|p| (p.clone(), lines.clone()))
+        .map(|p| {
+            let lines = if current.as_deref() == Some(p.as_str()) {
+                match codex::usage::fetch_usage() {
+                    Ok(Some(limits)) => {
+                        let mut lines = Vec::new();
+                        if let Some(primary) = &limits.primary {
+                            lines.push(format_usage_line(
+                                "5-hour",
+                                primary.used_percent,
+                                primary.resets_at_utc(),
+                            ));
+                        }
+                        if let Some(secondary) = &limits.secondary {
+                            lines.push(format_usage_line(
+                                "Weekly",
+                                secondary.used_percent,
+                                secondary.resets_at_utc(),
+                            ));
+                        }
+                        if lines.is_empty() {
+                            vec!["No usage data available".to_string()]
+                        } else {
+                            lines
+                        }
+                    }
+                    Ok(None) => vec!["No usage data available".to_string()],
+                    Err(e) => vec![format!("Error: {}", e)],
+                }
+            } else {
+                vec![]
+            };
+            (p.clone(), lines)
+        })
         .collect()
 }
 

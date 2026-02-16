@@ -35,10 +35,10 @@ impl RateWindow {
     }
 }
 
-fn find_latest_session_file() -> Result<Option<PathBuf>> {
+fn find_session_files() -> Result<Vec<PathBuf>> {
     let sessions_dir = Tool::Codex.home_dir()?.join("sessions");
     if !sessions_dir.exists() {
-        return Ok(None);
+        return Ok(vec![]);
     }
 
     let today = Local::now().date_naive();
@@ -61,14 +61,21 @@ fn find_latest_session_file() -> Result<Option<PathBuf>> {
             .filter(|p| p.extension().is_some_and(|ext| ext == "jsonl"))
             .collect();
 
-        files.sort();
-
-        if let Some(latest) = files.last() {
-            return Ok(Some(latest.clone()));
+        if files.is_empty() {
+            continue;
         }
+
+        // Sort by modification time, newest first
+        files.sort_by(|a, b| {
+            let mtime_a = a.metadata().and_then(|m| m.modified()).ok();
+            let mtime_b = b.metadata().and_then(|m| m.modified()).ok();
+            mtime_b.cmp(&mtime_a)
+        });
+
+        return Ok(files);
     }
 
-    Ok(None)
+    Ok(vec![])
 }
 
 fn read_rate_limits_from_tail(path: &PathBuf) -> Result<Option<RateLimits>> {
@@ -101,9 +108,11 @@ fn read_rate_limits_from_tail(path: &PathBuf) -> Result<Option<RateLimits>> {
 }
 
 pub fn fetch_usage() -> Result<Option<RateLimits>> {
-    let path = find_latest_session_file()?;
-    match path {
-        Some(p) => read_rate_limits_from_tail(&p),
-        None => Ok(None),
+    let files = find_session_files()?;
+    for file in &files {
+        if let Some(limits) = read_rate_limits_from_tail(file)? {
+            return Ok(Some(limits));
+        }
     }
+    Ok(None)
 }
