@@ -12,10 +12,13 @@ pub fn switch(profile: &str) -> Result<()> {
         return Err(anyhow!("profile '{}' does not exist for {}", profile, TOOL));
     }
 
+    // Save active auth.json to current profile
+    sync_auth_to_current_profile();
+
     // Update _current file
     fs::write(TOOL.current_file()?, format!("{}\n", profile))?;
 
-    // Sync auth.json to root
+    // Load new profile's auth.json to root
     let src = profile_dir.join("auth.json");
     if src.exists() {
         let dest = TOOL.home_dir()?.join("auth.json");
@@ -23,6 +26,24 @@ pub fn switch(profile: &str) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn sync_auth_to_current_profile() {
+    let current = match TOOL.current_profile() {
+        Ok(Some(name)) => name,
+        _ => return,
+    };
+    let dest = match TOOL.profile_dir(&current) {
+        Ok(dir) => dir.join("auth.json"),
+        _ => return,
+    };
+    let src = match TOOL.home_dir() {
+        Ok(dir) => dir.join("auth.json"),
+        _ => return,
+    };
+    if src.exists() && dest.exists() {
+        let _ = fs::copy(&src, &dest);
+    }
 }
 
 pub fn save(name: &str) -> Result<()> {
