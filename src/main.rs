@@ -4,12 +4,15 @@ mod codex;
 mod display;
 mod tool;
 
+use std::collections::HashMap;
+
 use anyhow::Result;
 use clap::Parser;
+use console::{Key, Term};
 use dialoguer::{Confirm, Input, Select};
 
 use cli::{Cli, Command};
-use display::{format_reset_time, render_bar};
+use display::{format_reset_time, format_usage_line, render_bar};
 use tool::Tool;
 
 #[tokio::main]
@@ -73,21 +76,170 @@ fn select_profile(tool: Tool) -> Result<String> {
 async fn cmd_interactive() -> Result<()> {
     let tool = select_tool()?;
 
-    // Show current usage
-    print_usage_for_tool(tool).await;
+    let profiles = tool.list_profiles()?;
+    if profiles.is_empty() {
+        anyhow::bail!("no profiles found for {}", tool);
+    }
 
-    // Select and switch profile
-    let profile = select_profile(tool)?;
+    let current = tool.current_profile()?;
 
-    if tool.current_profile()?.as_deref() == Some(profile.as_str()) {
+    // Prefetch usage for all profiles
+    let usage_cache = prefetch_usage(tool, &profiles).await;
+
+    // Select profile with usage preview
+    let selection = select_profile_with_usage(&profiles, current.as_deref(), &usage_cache)?;
+    let profile = &profiles[selection];
+
+    if current.as_deref() == Some(profile.as_str()) {
         println!("Already on profile '{}'", profile);
         return Ok(());
     }
 
-    cmd_switch(tool, &profile)?;
+    cmd_switch(tool, profile)?;
     println!("Switched {} to profile '{}'", tool, profile);
 
     Ok(())
+}
+
+async fn prefetch_usage(tool: Tool, profiles: &[String]) -> HashMap<String, Vec<String>> {
+    match tool {
+        Tool::Claude => prefetch_claude_usage().await,
+        Tool::Codex => prefetch_codex_usage(profiles),
+    }
+}
+
+async fn prefetch_claude_usage() -> HashMap<String, Vec<String>> {
+    let results = claude::usage::fetch_all_profiles_usage().await;
+    results
+        .into_iter()
+        .map(|(profile, result)| {
+            let lines = match result {
+                Ok((usage, _info)) => {
+                    vec![
+                        format_usage_line(
+                            "5-hour",
+                            usage.five_hour.utilization,
+                            usage.five_hour.resets_at,
+                        ),
+                        format_usage_line(
+                            "Weekly",
+                            usage.seven_day.utilization,
+                            usage.seven_day.resets_at,
+                        ),
+                    ]
+                }
+                Err(e) => vec![format!("Error: {}", e)],
+            };
+            (profile, lines)
+        })
+        .collect()
+}
+
+fn prefetch_codex_usage(profiles: &[String]) -> HashMap<String, Vec<String>> {
+    let lines = match codex::usage::fetch_usage() {
+        Ok(Some(limits)) => {
+            let mut lines = Vec::new();
+            if let Some(primary) = &limits.primary {
+                lines.push(format_usage_line(
+                    "5-hour",
+                    primary.used_percent,
+                    primary.resets_at_utc(),
+                ));
+            }
+            if let Some(secondary) = &limits.secondary {
+                lines.push(format_usage_line(
+                    "Weekly",
+                    secondary.used_percent,
+                    secondary.resets_at_utc(),
+                ));
+            }
+            if lines.is_empty() {
+                vec!["No usage data available".to_string()]
+            } else {
+                lines
+            }
+        }
+        Ok(None) => vec!["No usage data available".to_string()],
+        Err(e) => vec![format!("Error: {}", e)],
+    };
+    profiles
+        .iter()
+        .map(|p| (p.clone(), lines.clone()))
+        .collect()
+}
+
+struct CursorGuard<'a>(&'a Term);
+
+impl Drop for CursorGuard<'_> {
+    fn drop(&mut self) {
+        let _ = self.0.show_cursor();
+    }
+}
+
+fn select_profile_with_usage(
+    profiles: &[String],
+    current: Option<&str>,
+    usage_cache: &HashMap<String, Vec<String>>,
+) -> Result<usize> {
+    let term = Term::stderr();
+    term.hide_cursor()?;
+    let _guard = CursorGuard(&term);
+
+    let default = profiles
+        .iter()
+        .position(|p| current == Some(p.as_str()))
+        .unwrap_or(0);
+    let mut selected = default;
+    let mut rendered_lines: usize = 0;
+
+    loop {
+        if rendered_lines > 0 {
+            term.clear_last_lines(rendered_lines)?;
+        }
+
+        let mut lines: usize = 0;
+
+        term.write_line("Select profile:")?;
+        lines += 1;
+
+        for (i, profile) in profiles.iter().enumerate() {
+            let cursor = if i == selected { ">" } else { " " };
+            let suffix = if current == Some(profile.as_str()) {
+                " (current)"
+            } else {
+                ""
+            };
+            term.write_line(&format!("{} {}{}", cursor, profile, suffix))?;
+            lines += 1;
+        }
+
+        if let Some(usage_lines) = usage_cache.get(&profiles[selected])
+            && !usage_lines.is_empty()
+        {
+            term.write_line("")?;
+            lines += 1;
+            for line in usage_lines {
+                term.write_line(line)?;
+                lines += 1;
+            }
+        }
+
+        rendered_lines = lines;
+
+        match term.read_key()? {
+            Key::ArrowUp => {
+                selected = selected.saturating_sub(1);
+            }
+            Key::ArrowDown => {
+                if selected < profiles.len() - 1 {
+                    selected += 1;
+                }
+            }
+            Key::Enter => return Ok(selected),
+            Key::Escape => anyhow::bail!("cancelled"),
+            _ => {}
+        }
+    }
 }
 
 fn cmd_save() -> Result<()> {
