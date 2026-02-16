@@ -1,23 +1,34 @@
+use std::path::PathBuf;
+
 use anyhow::{Result, anyhow};
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
+use serde_json::Value;
 
 use crate::tool::Tool;
 
-#[derive(Debug, Deserialize)]
-struct Credentials {
-    #[serde(rename = "claudeAiOauth")]
-    claude_ai_oauth: Option<OAuthData>,
-}
+const CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
+const TOKEN_URL: &str = "https://console.anthropic.com/v1/oauth/token";
 
 #[derive(Debug, Deserialize)]
 struct OAuthData {
     #[serde(rename = "accessToken")]
     access_token: String,
+    #[serde(rename = "refreshToken")]
+    refresh_token: Option<String>,
+    #[serde(rename = "expiresAt")]
+    expires_at: Option<u64>,
     #[serde(rename = "organizationName")]
     organization_name: Option<String>,
     #[serde(rename = "planType")]
     plan_type: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TokenResponse {
+    access_token: String,
+    refresh_token: Option<String>,
+    expires_in: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -33,41 +44,103 @@ pub struct UsageWindow {
 }
 
 pub struct ProfileInfo {
-    #[allow(dead_code)] // Field is populated but may be used in future
+    #[allow(dead_code)]
     pub organization_name: Option<String>,
     pub plan_type: Option<String>,
 }
 
-fn read_credentials() -> Result<(String, ProfileInfo)> {
+fn creds_path() -> Result<PathBuf> {
     let current = Tool::Claude
         .current_profile()?
         .ok_or_else(|| anyhow!("no current profile set for Claude Code"))?;
+    Ok(Tool::Claude.profile_dir(&current)?.join("credentials.json"))
+}
 
-    let creds_path = Tool::Claude.profile_dir(&current)?.join("credentials.json");
+fn read_oauth(raw: &Value) -> Result<OAuthData> {
+    let oauth_value = raw
+        .get("claudeAiOauth")
+        .ok_or_else(|| anyhow!("no OAuth data in credentials"))?;
+    Ok(serde_json::from_value(oauth_value.clone())?)
+}
 
-    if !creds_path.exists() {
+fn is_token_expired(oauth: &OAuthData) -> bool {
+    match oauth.expires_at {
+        // 5 minute buffer
+        Some(expires_at) => {
+            let now_ms = Utc::now().timestamp_millis() as u64;
+            now_ms + 300_000 >= expires_at
+        }
+        None => false,
+    }
+}
+
+async fn refresh_token(oauth: &OAuthData) -> Result<TokenResponse> {
+    let refresh_token = oauth
+        .refresh_token
+        .as_ref()
+        .ok_or_else(|| anyhow!("no refresh token available"))?;
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(TOKEN_URL)
+        .json(&serde_json::json!({
+            "grant_type": "refresh_token",
+            "refresh_token": refresh_token,
+            "client_id": CLIENT_ID,
+        }))
+        .send()
+        .await?;
+
+    if !resp.status().is_success() {
         return Err(anyhow!(
-            "credentials.json not found for profile '{}'",
-            current
+            "token refresh failed ({}): {}",
+            resp.status(),
+            resp.text().await.unwrap_or_default()
         ));
     }
 
-    let content = std::fs::read_to_string(&creds_path)?;
-    let creds: Credentials = serde_json::from_str(&content)?;
-    let oauth = creds
-        .claude_ai_oauth
-        .ok_or_else(|| anyhow!("no OAuth data in credentials"))?;
+    Ok(resp.json().await?)
+}
+
+fn update_credentials(path: &PathBuf, raw: &mut Value, token_resp: &TokenResponse) {
+    if let Some(oauth) = raw.get_mut("claudeAiOauth") {
+        oauth["accessToken"] = Value::String(token_resp.access_token.clone());
+        if let Some(new_refresh) = &token_resp.refresh_token {
+            oauth["refreshToken"] = Value::String(new_refresh.clone());
+        }
+        let expires_in = token_resp.expires_in.unwrap_or(3600);
+        let new_expires_at = Utc::now().timestamp_millis() as u64 + expires_in * 1000;
+        oauth["expiresAt"] = Value::Number(new_expires_at.into());
+    }
+    // Best-effort write; ignore errors
+    let _ = std::fs::write(path, serde_json::to_string_pretty(raw).unwrap_or_default());
+}
+
+async fn get_access_token() -> Result<(String, ProfileInfo)> {
+    let path = creds_path()?;
+    let content = std::fs::read_to_string(&path)?;
+    let mut raw: Value = serde_json::from_str(&content)?;
+    let oauth = read_oauth(&raw)?;
 
     let info = ProfileInfo {
-        organization_name: oauth.organization_name,
-        plan_type: oauth.plan_type,
+        organization_name: oauth.organization_name.clone(),
+        plan_type: oauth.plan_type.clone(),
     };
 
-    Ok((oauth.access_token, info))
+    if !is_token_expired(&oauth) {
+        return Ok((oauth.access_token, info));
+    }
+
+    // Token expired, refresh it
+    let token_resp = refresh_token(&oauth).await?;
+    let access_token = token_resp.access_token.clone();
+    update_credentials(&path, &mut raw, &token_resp);
+
+    Ok((access_token, info))
 }
 
 pub async fn fetch_usage() -> Result<(UsageResponse, ProfileInfo)> {
-    let (token, info) = read_credentials()?;
+    let (token, info) = get_access_token().await?;
 
     let client = reqwest::Client::new();
     let resp = client
