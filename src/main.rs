@@ -87,7 +87,10 @@ async fn cmd_interactive() -> Result<()> {
     let usage_cache = prefetch_usage(tool, &profiles).await;
 
     // Select profile with usage preview
-    let selection = select_profile_with_usage(&profiles, current.as_deref(), &usage_cache)?;
+    let Some(selection) = select_profile_with_usage(&profiles, current.as_deref(), &usage_cache)?
+    else {
+        return Ok(());
+    };
     let profile = &profiles[selection];
 
     if current.as_deref() == Some(profile.as_str()) {
@@ -180,7 +183,7 @@ fn select_profile_with_usage(
     profiles: &[String],
     current: Option<&str>,
     usage_cache: &HashMap<String, Vec<String>>,
-) -> Result<usize> {
+) -> Result<Option<usize>> {
     let term = Term::stderr();
     term.hide_cursor()?;
     let _guard = CursorGuard(&term);
@@ -235,8 +238,8 @@ fn select_profile_with_usage(
                     selected += 1;
                 }
             }
-            Key::Enter => return Ok(selected),
-            Key::Escape => anyhow::bail!("cancelled"),
+            Key::Enter => return Ok(Some(selected)),
+            Key::Escape => return Ok(None),
             _ => {}
         }
     }
