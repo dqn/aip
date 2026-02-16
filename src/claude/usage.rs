@@ -83,11 +83,11 @@ async fn refresh_token(oauth: &OAuthData) -> Result<TokenResponse> {
     let client = reqwest::Client::new();
     let resp = client
         .post(TOKEN_URL)
-        .json(&serde_json::json!({
-            "grant_type": "refresh_token",
-            "refresh_token": refresh_token,
-            "client_id": CLIENT_ID,
-        }))
+        .form(&[
+            ("grant_type", "refresh_token"),
+            ("refresh_token", refresh_token.as_str()),
+            ("client_id", CLIENT_ID),
+        ])
         .send()
         .await?;
 
