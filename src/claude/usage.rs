@@ -157,20 +157,29 @@ pub async fn fetch_usage_with_token(token: &str) -> Result<UsageResponse> {
     Ok(resp.json().await?)
 }
 
-fn read_token_from_credentials(path: &Path) -> Result<(String, ProfileInfo)> {
+async fn get_access_token_from_credentials(path: &Path) -> Result<(String, ProfileInfo)> {
     let content = std::fs::read_to_string(path)?;
-    let raw: Value = serde_json::from_str(&content)?;
+    let mut raw: Value = serde_json::from_str(&content)?;
     let oauth = read_oauth(&raw)?;
 
-    if is_token_expired(&oauth) {
-        return Err(anyhow!("Token expired"));
+    let info = ProfileInfo {
+        organization_name: oauth.organization_name.clone(),
+        plan_type: oauth.plan_type.clone(),
+    };
+
+    if !is_token_expired(&oauth) {
+        return Ok((oauth.access_token, info));
     }
 
-    let info = ProfileInfo {
-        organization_name: oauth.organization_name,
-        plan_type: oauth.plan_type,
-    };
-    Ok((oauth.access_token, info))
+    // Token expired, refresh and update credentials.json
+    let token_resp = refresh_token(&oauth)
+        .await
+        .map_err(|_| anyhow!("Refresh token expired (switch to this profile to re-auth)"))?;
+    let access_token = token_resp.access_token.clone();
+    apply_token_response(&mut raw, &token_resp);
+    std::fs::write(path, serde_json::to_string_pretty(&raw)?)?;
+
+    Ok((access_token, info))
 }
 
 pub async fn fetch_all_profiles_usage() -> HashMap<String, Result<(UsageResponse, ProfileInfo)>> {
@@ -189,7 +198,7 @@ pub async fn fetch_all_profiles_usage() -> HashMap<String, Result<(UsageResponse
             match Tool::Claude.profile_dir(profile) {
                 Ok(dir) => {
                     let creds_path = dir.join("credentials.json");
-                    match read_token_from_credentials(&creds_path) {
+                    match get_access_token_from_credentials(&creds_path).await {
                         Ok((token, info)) => match fetch_usage_with_token(&token).await {
                             Ok(usage) => Ok((usage, info)),
                             Err(e) => Err(e),

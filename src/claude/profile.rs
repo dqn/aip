@@ -13,6 +13,9 @@ pub fn switch(profile: &str) -> Result<()> {
         return Err(anyhow!("profile '{}' does not exist for {}", profile, TOOL));
     }
 
+    // Save current keychain to current profile's credentials.json
+    sync_keychain_to_current_profile();
+
     // Load profile credentials into keychain
     let creds_path = profile_dir.join("credentials.json");
     if creds_path.exists() {
@@ -23,6 +26,29 @@ pub fn switch(profile: &str) -> Result<()> {
 
     fs::write(TOOL.current_file()?, format!("{}\n", profile))?;
     Ok(())
+}
+
+fn sync_keychain_to_current_profile() {
+    let current = match TOOL.current_profile() {
+        Ok(Some(name)) => name,
+        _ => return,
+    };
+    let creds_path = match TOOL.profile_dir(&current) {
+        Ok(dir) => dir.join("credentials.json"),
+        _ => return,
+    };
+    if !creds_path.exists() {
+        return;
+    }
+    let value = match keychain::read() {
+        Ok(v) => v,
+        _ => return,
+    };
+    let json = match serde_json::to_string_pretty(&value) {
+        Ok(j) => j,
+        _ => return,
+    };
+    let _ = fs::write(&creds_path, json);
 }
 
 pub fn save(name: &str) -> Result<()> {
