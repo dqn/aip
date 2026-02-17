@@ -69,6 +69,8 @@ where
 }
 
 const STARTUP_PREFETCH_TIMEOUT: Duration = Duration::from_millis(250);
+const PREFETCH_POLL_INTERVAL: Duration = Duration::from_millis(100);
+const PREFETCH_RECHECK_TIMEOUT: Duration = Duration::from_millis(1);
 
 struct StartupUsagePrefetch {
     claude: PrefetchState,
@@ -124,6 +126,10 @@ impl PrefetchState {
                 Err(_) => HashMap::new(),
             },
         }
+    }
+
+    fn is_pending(&self) -> bool {
+        matches!(self, PrefetchState::Pending(_))
     }
 }
 
@@ -187,11 +193,17 @@ async fn cmd_interactive() -> Result<()> {
 
         let current = tool.current_profile()?;
 
-        let usage_cache = startup_prefetch.usage_cache(tool).await;
+        let mut usage_cache = startup_prefetch.usage_cache(tool).await;
+        let prefetch_state = startup_prefetch.state_mut(tool);
 
         // Select profile with usage preview
-        let Some(selection) =
-            select_profile_with_usage(&profiles, current.as_deref(), &usage_cache)?
+        let Some(selection) = select_profile_with_usage(
+            &profiles,
+            current.as_deref(),
+            &mut usage_cache,
+            prefetch_state,
+        )
+        .await?
         else {
             continue;
         };
@@ -316,10 +328,37 @@ impl Drop for CursorGuard<'_> {
     }
 }
 
-fn select_profile_with_usage(
+fn spawn_read_key_task() -> tokio::task::JoinHandle<std::io::Result<Key>> {
+    tokio::task::spawn_blocking(|| Term::stderr().read_key())
+}
+
+async fn refresh_usage_cache(
+    usage_cache: &mut HashMap<String, Vec<String>>,
+    prefetch_state: &mut PrefetchState,
+) -> bool {
+    let was_pending = prefetch_state.is_pending();
+    let updated = prefetch_state
+        .usage_cache_with_timeout(PREFETCH_RECHECK_TIMEOUT)
+        .await;
+    let is_pending = prefetch_state.is_pending();
+
+    let mut changed = false;
+    if !updated.is_empty() && *usage_cache != updated {
+        *usage_cache = updated;
+        changed = true;
+    }
+    if was_pending != is_pending {
+        changed = true;
+    }
+
+    changed
+}
+
+async fn select_profile_with_usage(
     profiles: &[String],
     current: Option<&str>,
-    usage_cache: &HashMap<String, Vec<String>>,
+    usage_cache: &mut HashMap<String, Vec<String>>,
+    prefetch_state: &mut PrefetchState,
 ) -> Result<Option<usize>> {
     let term = Term::stderr();
     term.hide_cursor()?;
@@ -331,56 +370,104 @@ fn select_profile_with_usage(
         .unwrap_or(0);
     let mut selected = default;
     let mut rendered_lines: usize = 0;
+    let mut needs_render = true;
+    let mut key_task = spawn_read_key_task();
 
     loop {
-        if rendered_lines > 0 {
-            term.clear_last_lines(rendered_lines)?;
-        }
+        if needs_render {
+            if rendered_lines > 0 {
+                term.clear_last_lines(rendered_lines)?;
+            }
 
-        let mut lines: usize = 0;
+            let mut lines: usize = 0;
 
-        term.write_line("Select profile:")?;
-        lines += 1;
-
-        for (i, profile) in profiles.iter().enumerate() {
-            let cursor = if i == selected { ">" } else { " " };
-            let suffix = if current == Some(profile.as_str()) {
-                " (current)"
-            } else {
-                ""
-            };
-            term.write_line(&format!("{} {}{}", cursor, profile, suffix))?;
+            term.write_line("Select profile:")?;
             lines += 1;
-        }
 
-        if let Some(usage_lines) = usage_cache.get(&profiles[selected])
-            && !usage_lines.is_empty()
-        {
-            term.write_line("")?;
-            lines += 1;
-            for line in usage_lines {
-                term.write_line(line)?;
+            for (i, profile) in profiles.iter().enumerate() {
+                let cursor = if i == selected { ">" } else { " " };
+                let suffix = if current == Some(profile.as_str()) {
+                    " (current)"
+                } else {
+                    ""
+                };
+                term.write_line(&format!("{} {}{}", cursor, profile, suffix))?;
                 lines += 1;
             }
+
+            if let Some(usage_lines) = usage_cache.get(&profiles[selected])
+                && !usage_lines.is_empty()
+            {
+                term.write_line("")?;
+                lines += 1;
+                for line in usage_lines {
+                    term.write_line(line)?;
+                    lines += 1;
+                }
+            } else if prefetch_state.is_pending() {
+                term.write_line("")?;
+                term.write_line("Loading usage...")?;
+                lines += 2;
+            }
+
+            rendered_lines = lines;
+            needs_render = false;
         }
 
-        rendered_lines = lines;
-
-        match term.read_key()? {
-            Key::ArrowUp => {
-                selected = selected.saturating_sub(1);
-            }
-            Key::ArrowDown => {
-                if selected < profiles.len() - 1 {
-                    selected += 1;
+        if prefetch_state.is_pending() {
+            tokio::select! {
+                key_result = &mut key_task => {
+                    let key = key_result
+                        .map_err(|e| anyhow!("failed to read key input: {}", e))??;
+                    match key {
+                        Key::ArrowUp => {
+                            selected = selected.saturating_sub(1);
+                            needs_render = true;
+                        }
+                        Key::ArrowDown => {
+                            if selected < profiles.len() - 1 {
+                                selected += 1;
+                                needs_render = true;
+                            }
+                        }
+                        Key::Enter => return Ok(Some(selected)),
+                        Key::Escape => {
+                            term.clear_last_lines(rendered_lines)?;
+                            return Ok(None);
+                        }
+                        _ => {}
+                    }
+                    key_task = spawn_read_key_task();
+                }
+                _ = tokio::time::sleep(PREFETCH_POLL_INTERVAL) => {
+                    if refresh_usage_cache(usage_cache, prefetch_state).await {
+                        needs_render = true;
+                    }
                 }
             }
-            Key::Enter => return Ok(Some(selected)),
-            Key::Escape => {
-                term.clear_last_lines(rendered_lines)?;
-                return Ok(None);
+        } else {
+            let key = (&mut key_task)
+                .await
+                .map_err(|e| anyhow!("failed to read key input: {}", e))??;
+            match key {
+                Key::ArrowUp => {
+                    selected = selected.saturating_sub(1);
+                    needs_render = true;
+                }
+                Key::ArrowDown => {
+                    if selected < profiles.len() - 1 {
+                        selected += 1;
+                        needs_render = true;
+                    }
+                }
+                Key::Enter => return Ok(Some(selected)),
+                Key::Escape => {
+                    term.clear_last_lines(rendered_lines)?;
+                    return Ok(None);
+                }
+                _ => {}
             }
-            _ => {}
+            key_task = spawn_read_key_task();
         }
     }
 }
@@ -697,5 +784,27 @@ mod tests {
             .await;
 
         assert!(actual.is_empty());
+    }
+
+    #[tokio::test]
+    async fn refresh_usage_cache_updates_when_prefetch_completes() {
+        let handle = tokio::spawn(async {
+            sleep(Duration::from_millis(30)).await;
+            let mut cache = HashMap::new();
+            cache.insert("p1".to_string(), vec!["ok".to_string()]);
+            cache
+        });
+        let mut state = PrefetchState::Pending(handle);
+        let mut cache = HashMap::new();
+
+        let first = refresh_usage_cache(&mut cache, &mut state).await;
+        assert!(!first);
+        assert!(cache.is_empty());
+
+        sleep(Duration::from_millis(40)).await;
+
+        let second = refresh_usage_cache(&mut cache, &mut state).await;
+        assert!(second);
+        assert_eq!(cache.get("p1"), Some(&vec!["ok".to_string()]));
     }
 }
