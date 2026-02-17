@@ -68,6 +68,72 @@ where
     result
 }
 
+const STARTUP_PREFETCH_TIMEOUT: Duration = Duration::from_millis(250);
+
+struct StartupUsagePrefetch {
+    claude: PrefetchState,
+    codex: PrefetchState,
+}
+
+enum PrefetchState {
+    Pending(tokio::task::JoinHandle<HashMap<String, Vec<String>>>),
+    Ready(HashMap<String, Vec<String>>),
+    Failed,
+}
+
+impl StartupUsagePrefetch {
+    fn start() -> Self {
+        let codex_profiles = Tool::Codex.list_profiles().unwrap_or_default();
+        Self {
+            claude: PrefetchState::Pending(spawn_prefetch_task(Tool::Claude, Vec::new())),
+            codex: PrefetchState::Pending(spawn_prefetch_task(Tool::Codex, codex_profiles)),
+        }
+    }
+
+    async fn usage_cache(&mut self, tool: Tool) -> HashMap<String, Vec<String>> {
+        self.state_mut(tool)
+            .usage_cache_with_timeout(STARTUP_PREFETCH_TIMEOUT)
+            .await
+    }
+
+    fn state_mut(&mut self, tool: Tool) -> &mut PrefetchState {
+        match tool {
+            Tool::Claude => &mut self.claude,
+            Tool::Codex => &mut self.codex,
+        }
+    }
+}
+
+impl PrefetchState {
+    async fn usage_cache_with_timeout(
+        &mut self,
+        timeout: Duration,
+    ) -> HashMap<String, Vec<String>> {
+        match self {
+            PrefetchState::Ready(cache) => cache.clone(),
+            PrefetchState::Failed => HashMap::new(),
+            PrefetchState::Pending(handle) => match tokio::time::timeout(timeout, handle).await {
+                Ok(Ok(cache)) => {
+                    *self = PrefetchState::Ready(cache.clone());
+                    cache
+                }
+                Ok(Err(_)) => {
+                    *self = PrefetchState::Failed;
+                    HashMap::new()
+                }
+                Err(_) => HashMap::new(),
+            },
+        }
+    }
+}
+
+fn spawn_prefetch_task(
+    tool: Tool,
+    profiles: Vec<String>,
+) -> tokio::task::JoinHandle<HashMap<String, Vec<String>>> {
+    tokio::spawn(async move { prefetch_usage(tool, &profiles).await })
+}
+
 fn select_tool() -> Result<Option<Tool>> {
     let items = ["Claude Code", "Codex CLI"];
     let selection = Select::new()
@@ -107,6 +173,8 @@ fn select_profile(tool: Tool) -> Result<String> {
 }
 
 async fn cmd_interactive() -> Result<()> {
+    let mut startup_prefetch = StartupUsagePrefetch::start();
+
     loop {
         let Some(tool) = select_tool()? else {
             return Ok(());
@@ -119,8 +187,7 @@ async fn cmd_interactive() -> Result<()> {
 
         let current = tool.current_profile()?;
 
-        // Prefetch usage for all profiles
-        let usage_cache = with_spinner("Fetching usage...", prefetch_usage(tool, &profiles)).await;
+        let usage_cache = startup_prefetch.usage_cache(tool).await;
 
         // Select profile with usage preview
         let Some(selection) =
@@ -565,4 +632,60 @@ fn cmd_login() -> Result<()> {
 
     println!("Saved credentials to profile '{}' for {}", profile, tool);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::time::sleep;
+
+    #[tokio::test]
+    async fn prefetch_state_returns_ready_cache_immediately() {
+        let mut cache = HashMap::new();
+        cache.insert("p1".to_string(), vec!["ok".to_string()]);
+        let mut state = PrefetchState::Ready(cache.clone());
+
+        let actual = state
+            .usage_cache_with_timeout(Duration::from_millis(1))
+            .await;
+
+        assert_eq!(actual, cache);
+    }
+
+    #[tokio::test]
+    async fn prefetch_state_returns_empty_on_timeout_then_returns_result() {
+        let handle = tokio::spawn(async {
+            sleep(Duration::from_millis(30)).await;
+            let mut cache = HashMap::new();
+            cache.insert("p1".to_string(), vec!["ok".to_string()]);
+            cache
+        });
+        let mut state = PrefetchState::Pending(handle);
+
+        let first = state
+            .usage_cache_with_timeout(Duration::from_millis(1))
+            .await;
+        assert!(first.is_empty());
+
+        let second = state
+            .usage_cache_with_timeout(Duration::from_millis(50))
+            .await;
+        assert_eq!(second.get("p1"), Some(&vec!["ok".to_string()]));
+    }
+
+    #[tokio::test]
+    async fn prefetch_state_returns_empty_when_prefetch_task_fails() {
+        let handle = tokio::spawn(async {
+            panic!("boom");
+            #[allow(unreachable_code)]
+            HashMap::<String, Vec<String>>::new()
+        });
+        let mut state = PrefetchState::Pending(handle);
+
+        let actual = state
+            .usage_cache_with_timeout(Duration::from_millis(50))
+            .await;
+
+        assert!(actual.is_empty());
+    }
 }
