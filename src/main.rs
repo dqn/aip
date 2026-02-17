@@ -38,15 +38,15 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-fn select_tool() -> Result<Tool> {
+fn select_tool() -> Result<Option<Tool>> {
     let items = ["Claude Code", "Codex CLI"];
     let selection = Select::new()
         .with_prompt("Select tool")
         .items(&items)
         .default(0)
-        .interact()?;
+        .interact_opt()?;
 
-    Ok(Tool::ALL[selection])
+    Ok(selection.map(|i| Tool::ALL[i]))
 }
 
 fn select_profile(tool: Tool) -> Result<String> {
@@ -77,34 +77,39 @@ fn select_profile(tool: Tool) -> Result<String> {
 }
 
 async fn cmd_interactive() -> Result<()> {
-    let tool = select_tool()?;
+    loop {
+        let Some(tool) = select_tool()? else {
+            return Ok(());
+        };
 
-    let profiles = tool.list_profiles()?;
-    if profiles.is_empty() {
-        anyhow::bail!("no profiles found for {}", tool);
-    }
+        let profiles = tool.list_profiles()?;
+        if profiles.is_empty() {
+            anyhow::bail!("no profiles found for {}", tool);
+        }
 
-    let current = tool.current_profile()?;
+        let current = tool.current_profile()?;
 
-    // Prefetch usage for all profiles
-    let usage_cache = prefetch_usage(tool, &profiles).await;
+        // Prefetch usage for all profiles
+        let usage_cache = prefetch_usage(tool, &profiles).await;
 
-    // Select profile with usage preview
-    let Some(selection) = select_profile_with_usage(&profiles, current.as_deref(), &usage_cache)?
-    else {
+        // Select profile with usage preview
+        let Some(selection) =
+            select_profile_with_usage(&profiles, current.as_deref(), &usage_cache)?
+        else {
+            continue;
+        };
+        let profile = &profiles[selection];
+
+        if current.as_deref() == Some(profile.as_str()) {
+            println!("Already on profile '{}'", profile);
+            return Ok(());
+        }
+
+        cmd_switch(tool, profile)?;
+        println!("Switched {} to profile '{}'", tool, profile);
+
         return Ok(());
-    };
-    let profile = &profiles[selection];
-
-    if current.as_deref() == Some(profile.as_str()) {
-        println!("Already on profile '{}'", profile);
-        return Ok(());
     }
-
-    cmd_switch(tool, profile)?;
-    println!("Switched {} to profile '{}'", tool, profile);
-
-    Ok(())
 }
 
 async fn prefetch_usage(tool: Tool, profiles: &[String]) -> HashMap<String, Vec<String>> {
@@ -271,7 +276,10 @@ fn select_profile_with_usage(
                 }
             }
             Key::Enter => return Ok(Some(selected)),
-            Key::Escape => return Ok(None),
+            Key::Escape => {
+                term.clear_last_lines(rendered_lines)?;
+                return Ok(None);
+            }
             _ => {}
         }
     }
@@ -280,7 +288,12 @@ fn select_profile_with_usage(
 fn cmd_save(tool_arg: Option<String>, profile_arg: Option<String>) -> Result<()> {
     let tool = match tool_arg {
         Some(t) => t.parse()?,
-        None => select_tool()?,
+        None => {
+            let Some(t) = select_tool()? else {
+                return Ok(());
+            };
+            t
+        }
     };
 
     let name = match profile_arg {
@@ -438,7 +451,12 @@ fn cmd_switch(tool: Tool, profile: &str) -> Result<()> {
 fn cmd_delete(tool_arg: Option<String>, profile_arg: Option<String>) -> Result<()> {
     let tool: Tool = match tool_arg {
         Some(t) => t.parse()?,
-        None => select_tool()?,
+        None => {
+            let Some(t) = select_tool()? else {
+                return Ok(());
+            };
+            t
+        }
     };
 
     let profile = match profile_arg {
@@ -486,7 +504,9 @@ fn select_or_create_profile(tool: Tool) -> Result<String> {
 }
 
 fn cmd_login() -> Result<()> {
-    let tool = select_tool()?;
+    let Some(tool) = select_tool()? else {
+        return Ok(());
+    };
     let profile = select_or_create_profile(tool)?;
 
     let status = match tool {
