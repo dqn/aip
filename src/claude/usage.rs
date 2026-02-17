@@ -238,10 +238,12 @@ mod tests {
         let parsed: Result<UsageResponse, _> = serde_json::from_str(payload);
 
         assert!(parsed.is_ok());
-        assert!(parsed
-            .expect("usage payload should deserialize")
-            .five_hour
-            .resets_at
-            .is_none());
+        assert!(
+            parsed
+                .expect("usage payload should deserialize")
+                .five_hour
+                .resets_at
+                .is_none()
+        );
     }
 }
