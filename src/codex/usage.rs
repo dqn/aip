@@ -13,13 +13,16 @@ const CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 
 #[derive(Debug, Deserialize)]
 pub struct RateLimits {
+    #[serde(rename = "primary_window")]
     pub primary: Option<RateWindow>,
+    #[serde(rename = "secondary_window")]
     pub secondary: Option<RateWindow>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct RateWindow {
     pub used_percent: f64,
+    #[serde(rename = "reset_at")]
     pub resets_at: i64,
 }
 
