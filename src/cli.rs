@@ -1,10 +1,30 @@
+use std::ffi::{OsStr, OsString};
+
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(about = "AI Profile Manager - manage profiles for Claude Code and Codex CLI")]
+#[command(
+    about = "AI Profile Manager - manage profiles for Claude Code and Codex CLI",
+    version
+)]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Option<Command>,
+}
+
+pub fn normalize_short_version_flag<I, T>(args: I) -> Vec<OsString>
+where
+    I: IntoIterator<Item = T>,
+    T: Into<OsString>,
+{
+    let mut normalized: Vec<OsString> = args.into_iter().map(Into::into).collect();
+    if normalized
+        .get(1)
+        .is_some_and(|arg| arg.as_os_str() == OsStr::new("-v"))
+    {
+        normalized[1] = OsString::from("--version");
+    }
+    normalized
 }
 
 #[derive(Subcommand)]
@@ -89,5 +109,39 @@ mod tests {
                 profile: None,
             })
         ));
+    }
+
+    #[test]
+    fn version_long_option_displays_version() {
+        let parsed = Cli::try_parse_from(["aip", "--version"]);
+        assert!(parsed.is_err());
+        let error = parsed
+            .err()
+            .expect("expected --version to trigger clap output");
+
+        assert_eq!(error.kind(), clap::error::ErrorKind::DisplayVersion);
+    }
+
+    #[test]
+    fn version_short_option_displays_version() {
+        let parsed = Cli::try_parse_from(normalize_short_version_flag(["aip", "-v"]));
+        assert!(parsed.is_err());
+        let error = parsed.err().expect("expected -v to trigger clap output");
+
+        assert_eq!(error.kind(), clap::error::ErrorKind::DisplayVersion);
+    }
+
+    #[test]
+    fn normalize_short_version_flag_only_changes_first_cli_arg() {
+        let normalized = normalize_short_version_flag(["aip", "login", "-v"]);
+
+        assert_eq!(
+            normalized,
+            vec![
+                OsString::from("aip"),
+                OsString::from("login"),
+                OsString::from("-v"),
+            ]
+        );
     }
 }

@@ -23,7 +23,7 @@ use tool::Tool;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let cli = Cli::parse();
+    let cli = Cli::parse_from(cli::normalize_short_version_flag(std::env::args_os()));
 
     match cli.command {
         None => cmd_interactive().await?,
