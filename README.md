@@ -21,6 +21,12 @@ AI Profile Manager for Claude Code and Codex CLI.
 ## Installation
 
 ```bash
+cargo install aip-cli
+```
+
+From local source:
+
+```bash
 cargo install --path .
 ```
 
