@@ -15,6 +15,14 @@ pub fn switch(profile: &str) -> Result<()> {
     // Save active auth.json to current profile
     sync_auth_to_current_profile();
 
+    // Record session cutoff for the outgoing profile
+    if let Ok(Some(current)) = TOOL.current_profile()
+        && current != profile
+    {
+        let cutoff = TOOL.profile_dir(&current)?.join("_session_cutoff");
+        fs::write(&cutoff, "")?;
+    }
+
     // Update _current file
     fs::write(TOOL.current_file()?, format!("{}\n", profile))?;
 

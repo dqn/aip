@@ -35,7 +35,10 @@ impl RateWindow {
     }
 }
 
-fn find_session_files(since: Option<std::time::SystemTime>) -> Result<Vec<PathBuf>> {
+fn find_session_files(
+    since: Option<std::time::SystemTime>,
+    cutoff: Option<std::time::SystemTime>,
+) -> Result<Vec<PathBuf>> {
     let sessions_dir = Tool::Codex.home_dir()?.join("sessions");
     if !sessions_dir.exists() {
         return Ok(vec![]);
@@ -72,12 +75,12 @@ fn find_session_files(since: Option<std::time::SystemTime>) -> Result<Vec<PathBu
             mtime_b.cmp(&mtime_a)
         });
 
-        // Filter out files older than the profile switch boundary
-        if let Some(since) = since {
+        // Filter: include files from current activation (>= since) or previous activations (<= cutoff)
+        if since.is_some() || cutoff.is_some() {
             files.retain(|p| {
-                p.metadata()
-                    .and_then(|m| m.modified())
-                    .is_ok_and(|mtime| mtime >= since)
+                p.metadata().and_then(|m| m.modified()).is_ok_and(|mtime| {
+                    since.is_none_or(|s| mtime >= s) || cutoff.is_some_and(|c| mtime <= c)
+                })
             });
         }
 
@@ -116,8 +119,11 @@ fn read_rate_limits_from_tail(path: &PathBuf) -> Result<Option<RateLimits>> {
     Ok(None)
 }
 
-pub fn fetch_usage(since: Option<std::time::SystemTime>) -> Result<Option<RateLimits>> {
-    let files = find_session_files(since)?;
+pub fn fetch_usage(
+    since: Option<std::time::SystemTime>,
+    cutoff: Option<std::time::SystemTime>,
+) -> Result<Option<RateLimits>> {
+    let files = find_session_files(since, cutoff)?;
     for file in &files {
         if let Some(limits) = read_rate_limits_from_tail(file)? {
             return Ok(Some(limits));

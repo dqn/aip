@@ -143,19 +143,31 @@ async fn prefetch_claude_usage() -> HashMap<String, Vec<String>> {
         .collect()
 }
 
-fn prefetch_codex_usage(profiles: &[String]) -> HashMap<String, Vec<String>> {
-    let current = Tool::Codex.current_profile().ok().flatten();
+fn codex_session_boundaries() -> (Option<std::time::SystemTime>, Option<std::time::SystemTime>) {
     let since = Tool::Codex
         .current_file()
         .ok()
         .and_then(|p| p.metadata().ok())
         .and_then(|m| m.modified().ok());
+    let cutoff = Tool::Codex
+        .current_profile()
+        .ok()
+        .flatten()
+        .and_then(|name| Tool::Codex.profile_dir(&name).ok())
+        .and_then(|dir| dir.join("_session_cutoff").metadata().ok())
+        .and_then(|m| m.modified().ok());
+    (since, cutoff)
+}
+
+fn prefetch_codex_usage(profiles: &[String]) -> HashMap<String, Vec<String>> {
+    let current = Tool::Codex.current_profile().ok().flatten();
+    let (since, cutoff) = codex_session_boundaries();
 
     profiles
         .iter()
         .map(|p| {
             let lines = if current.as_deref() == Some(p.as_str()) {
-                match codex::usage::fetch_usage(since) {
+                match codex::usage::fetch_usage(since, cutoff) {
                     Ok(Some(limits)) => {
                         let mut lines = Vec::new();
                         if let Some(primary) = &limits.primary {
@@ -341,13 +353,9 @@ async fn print_claude_usage(label: &str) {
 }
 
 fn print_codex_usage(label: &str) {
-    let since = Tool::Codex
-        .current_file()
-        .ok()
-        .and_then(|p| p.metadata().ok())
-        .and_then(|m| m.modified().ok());
+    let (since, cutoff) = codex_session_boundaries();
 
-    match codex::usage::fetch_usage(since) {
+    match codex::usage::fetch_usage(since, cutoff) {
         Ok(Some(limits)) => {
             println!("{}", label);
             if let Some(primary) = &limits.primary {
