@@ -33,7 +33,7 @@ cargo run -- <command>
 ## Commands
 
 ```bash
-aip login               # run tool login and save to selected profile
+aip login [tool] [name] # run tool login and save to selected/new profile
 aip save [tool] [name]  # save current credentials to a profile
 aip list                # list all profiles
 aip current             # show current profile per tool

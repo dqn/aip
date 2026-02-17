@@ -36,7 +36,7 @@ async fn main() -> Result<()> {
             let tool: Tool = tool.parse()?;
             cmd_switch(tool, &profile)?;
         }
-        Some(Command::Login) => cmd_login()?,
+        Some(Command::Login { tool, profile }) => cmd_login(tool, profile)?,
     }
 
     Ok(())
@@ -607,11 +607,21 @@ fn select_or_create_profile(tool: Tool) -> Result<String> {
     }
 }
 
-fn cmd_login() -> Result<()> {
-    let Some(tool) = select_tool()? else {
-        return Ok(());
+fn cmd_login(tool_arg: Option<String>, profile_arg: Option<String>) -> Result<()> {
+    let tool: Tool = match tool_arg {
+        Some(t) => t.parse()?,
+        None => {
+            let Some(t) = select_tool()? else {
+                return Ok(());
+            };
+            t
+        }
     };
-    let profile = select_or_create_profile(tool)?;
+
+    let profile = match profile_arg {
+        Some(p) => p,
+        None => select_or_create_profile(tool)?,
+    };
 
     let status = match tool {
         Tool::Claude => ProcessCommand::new("claude")
