@@ -18,11 +18,12 @@ where
     T: Into<OsString>,
 {
     let mut normalized: Vec<OsString> = args.into_iter().map(Into::into).collect();
-    if normalized
-        .get(1)
-        .is_some_and(|arg| arg.as_os_str() == OsStr::new("-v"))
-    {
-        normalized[1] = OsString::from("--version");
+    if let Some(arg) = normalized.get(1) {
+        if arg.as_os_str() == OsStr::new("-v") {
+            normalized[1] = OsString::from("--version");
+        } else if arg.as_os_str() == OsStr::new("-h") {
+            normalized[1] = OsString::from("--help");
+        }
     }
     normalized
 }
@@ -129,6 +130,33 @@ mod tests {
         let error = parsed.err().expect("expected -v to trigger clap output");
 
         assert_eq!(error.kind(), clap::error::ErrorKind::DisplayVersion);
+    }
+
+    #[test]
+    fn help_long_option_displays_help() {
+        let parsed = Cli::try_parse_from(["aip", "--help"]);
+        assert!(parsed.is_err());
+        let error = parsed
+            .err()
+            .expect("expected --help to trigger clap output");
+
+        assert_eq!(error.kind(), clap::error::ErrorKind::DisplayHelp);
+    }
+
+    #[test]
+    fn help_short_option_displays_help() {
+        let parsed = Cli::try_parse_from(normalize_short_version_flag(["aip", "-h"]));
+        assert!(parsed.is_err());
+        let error = parsed.err().expect("expected -h to trigger clap output");
+
+        assert_eq!(error.kind(), clap::error::ErrorKind::DisplayHelp);
+    }
+
+    #[test]
+    fn normalize_short_version_flag_converts_short_help_to_long_help() {
+        let normalized = normalize_short_version_flag(["aip", "-h"]);
+
+        assert_eq!(normalized, vec![OsString::from("aip"), OsString::from("--help"),]);
     }
 
     #[test]

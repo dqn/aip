@@ -41,6 +41,7 @@ aip                     # interactive mode (select tool + profile)
 aip switch <tool> <name> # switch profile without prompts
 aip usage               # show usage for current Claude and Codex profiles
 aip delete [tool] [name] # delete a profile
+aip -h, aip --help      # show command help
 aip -v, aip --version   # show aip version
 ```
 
