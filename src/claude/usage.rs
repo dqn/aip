@@ -42,7 +42,7 @@ pub struct UsageResponse {
 #[derive(Debug, Deserialize)]
 pub struct UsageWindow {
     pub utilization: f64,
-    pub resets_at: DateTime<Utc>,
+    pub resets_at: Option<DateTime<Utc>>,
 }
 
 pub struct ProfileInfo {
@@ -222,4 +222,26 @@ pub async fn fetch_all_profiles_usage() -> HashMap<String, Result<(UsageResponse
         }
     }
     results
+}
+
+#[cfg(test)]
+mod tests {
+    use super::UsageResponse;
+
+    #[test]
+    fn usage_response_accepts_null_resets_at() {
+        let payload = r#"{
+            "five_hour": { "utilization": 0.0, "resets_at": null },
+            "seven_day": { "utilization": 42.0, "resets_at": "2026-02-20T00:00:00+00:00" }
+        }"#;
+
+        let parsed: Result<UsageResponse, _> = serde_json::from_str(payload);
+
+        assert!(parsed.is_ok());
+        assert!(parsed
+            .expect("usage payload should deserialize")
+            .five_hour
+            .resets_at
+            .is_none());
+    }
 }
