@@ -1,21 +1,15 @@
-use std::io::{BufReader, Read, Seek, SeekFrom};
-use std::path::PathBuf;
+use std::path::Path;
 
-use anyhow::Result;
-use chrono::{DateTime, Local, Utc};
+use anyhow::{Result, anyhow};
+use chrono::{DateTime, Utc};
 use serde::Deserialize;
+use serde_json::Value;
 
 use crate::tool::Tool;
 
-#[derive(Debug, Deserialize)]
-struct SessionEntry {
-    payload: Option<SessionPayload>,
-}
-
-#[derive(Debug, Deserialize)]
-struct SessionPayload {
-    rate_limits: Option<RateLimits>,
-}
+const USAGE_URL: &str = "https://chatgpt.com/backend-api/wham/usage";
+const TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
+const CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 
 #[derive(Debug, Deserialize)]
 pub struct RateLimits {
@@ -35,106 +29,133 @@ impl RateWindow {
     }
 }
 
-fn find_session_files(
-    since: Option<std::time::SystemTime>,
-    cutoff: Option<std::time::SystemTime>,
-) -> Result<Vec<PathBuf>> {
-    let sessions_dir = Tool::Codex.home_dir()?.join("sessions");
-    if !sessions_dir.exists() {
-        return Ok(vec![]);
-    }
-
-    let today = Local::now().date_naive();
-
-    // Search from today backwards up to 7 days
-    for days_back in 0..7 {
-        let date = today - chrono::Duration::days(days_back);
-        let day_dir = sessions_dir
-            .join(date.format("%Y").to_string())
-            .join(date.format("%m").to_string())
-            .join(date.format("%d").to_string());
-
-        if !day_dir.exists() {
-            continue;
-        }
-
-        let mut files: Vec<PathBuf> = std::fs::read_dir(&day_dir)?
-            .filter_map(|e| e.ok())
-            .map(|e| e.path())
-            .filter(|p| p.extension().is_some_and(|ext| ext == "jsonl"))
-            .collect();
-
-        if files.is_empty() {
-            continue;
-        }
-
-        // Sort by modification time, newest first
-        files.sort_by(|a, b| {
-            let mtime_a = a.metadata().and_then(|m| m.modified()).ok();
-            let mtime_b = b.metadata().and_then(|m| m.modified()).ok();
-            mtime_b.cmp(&mtime_a)
-        });
-
-        // Filter: include files from current activation (>= since) or previous activations (<= cutoff)
-        if since.is_some() || cutoff.is_some() {
-            files.retain(|p| {
-                p.metadata().and_then(|m| m.modified()).is_ok_and(|mtime| {
-                    match (since, cutoff) {
-                        (Some(s), Some(c)) => mtime >= s || mtime <= c,
-                        (Some(s), None) => mtime >= s,
-                        (None, Some(c)) => mtime <= c,
-                        (None, None) => true, // unreachable (outer if guard)
-                    }
-                })
-            });
-        }
-
-        if !files.is_empty() {
-            return Ok(files);
-        }
-    }
-
-    Ok(vec![])
+#[derive(Debug, Deserialize)]
+struct UsageResponse {
+    rate_limit: Option<RateLimits>,
 }
 
-fn read_rate_limits_from_tail(path: &PathBuf) -> Result<Option<RateLimits>> {
-    let file = std::fs::File::open(path)?;
-    let size = file.metadata()?.len();
-
-    // Read last 64KB (should be more than enough)
-    let read_size = size.min(65536);
-    let mut reader = BufReader::new(file);
-    reader.seek(SeekFrom::End(-(read_size as i64)))?;
-
-    let mut buf = vec![0u8; read_size as usize];
-    reader.read_exact(&mut buf)?;
-    let content = String::from_utf8_lossy(&buf);
-
-    // Parse lines in reverse to find the latest rate_limits
-    for line in content.lines().rev() {
-        if !line.contains("rate_limits") {
-            continue;
-        }
-        if let Ok(entry) = serde_json::from_str::<SessionEntry>(line)
-            && let Some(payload) = entry.payload
-            && let Some(limits) = payload.rate_limits
-        {
-            return Ok(Some(limits));
-        }
-    }
-
-    Ok(None)
+#[derive(Debug, Deserialize)]
+struct TokenData {
+    access_token: String,
+    refresh_token: String,
+    account_id: Option<String>,
 }
 
-pub fn fetch_usage(
-    since: Option<std::time::SystemTime>,
-    cutoff: Option<std::time::SystemTime>,
-) -> Result<Option<RateLimits>> {
-    let files = find_session_files(since, cutoff)?;
-    for file in &files {
-        if let Some(limits) = read_rate_limits_from_tail(file)? {
-            return Ok(Some(limits));
+#[derive(Debug, Deserialize)]
+struct RefreshResponse {
+    access_token: Option<String>,
+    refresh_token: Option<String>,
+    #[allow(dead_code)]
+    id_token: Option<String>,
+}
+
+fn read_tokens(raw: &Value) -> Result<TokenData> {
+    let tokens_value = raw
+        .get("tokens")
+        .ok_or_else(|| anyhow!("no tokens in auth.json"))?;
+    Ok(serde_json::from_value(tokens_value.clone())?)
+}
+
+fn read_auth(path: &Path) -> Result<(Value, TokenData)> {
+    let content = std::fs::read_to_string(path)?;
+    let raw: Value = serde_json::from_str(&content)?;
+    let tokens = read_tokens(&raw)?;
+    Ok((raw, tokens))
+}
+
+async fn do_refresh_token(refresh_token: &str) -> Result<RefreshResponse> {
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(TOKEN_URL)
+        .json(&serde_json::json!({
+            "client_id": CLIENT_ID,
+            "grant_type": "refresh_token",
+            "refresh_token": refresh_token,
+            "scope": "openid profile email",
+        }))
+        .send()
+        .await?;
+
+    if !resp.status().is_success() {
+        return Err(anyhow!(
+            "token refresh failed ({}): {}",
+            resp.status(),
+            resp.text().await.unwrap_or_default()
+        ));
+    }
+
+    Ok(resp.json().await?)
+}
+
+fn apply_refresh(raw: &mut Value, resp: &RefreshResponse) {
+    if let Some(tokens) = raw.get_mut("tokens") {
+        if let Some(new_access) = &resp.access_token {
+            tokens["access_token"] = Value::String(new_access.clone());
+        }
+        if let Some(new_refresh) = &resp.refresh_token {
+            tokens["refresh_token"] = Value::String(new_refresh.clone());
+        }
+        if let Some(new_id) = &resp.id_token {
+            tokens["id_token"] = Value::String(new_id.clone());
         }
     }
-    Ok(None)
+}
+
+async fn fetch_usage_api(tokens: &TokenData) -> Result<reqwest::Response> {
+    let client = reqwest::Client::new();
+    let mut req = client
+        .get(USAGE_URL)
+        .header("Authorization", format!("Bearer {}", tokens.access_token));
+
+    if let Some(account_id) = &tokens.account_id {
+        req = req.header("ChatGPT-Account-Id", account_id);
+    }
+
+    Ok(req.send().await?)
+}
+
+async fn parse_usage_response(resp: reqwest::Response) -> Result<Option<RateLimits>> {
+    if !resp.status().is_success() {
+        return Err(anyhow!(
+            "usage API returned status {}: {}",
+            resp.status(),
+            resp.text().await.unwrap_or_default()
+        ));
+    }
+    let usage: UsageResponse = resp.json().await?;
+    Ok(usage.rate_limit)
+}
+
+async fn fetch_from_auth_path(path: &Path) -> Result<Option<RateLimits>> {
+    let (mut raw, tokens) = read_auth(path)?;
+
+    let resp = fetch_usage_api(&tokens).await?;
+
+    if resp.status() != reqwest::StatusCode::UNAUTHORIZED {
+        return parse_usage_response(resp).await;
+    }
+
+    // Token expired, try refreshing
+    let refresh_resp = do_refresh_token(&tokens.refresh_token).await?;
+    apply_refresh(&mut raw, &refresh_resp);
+    std::fs::write(path, serde_json::to_string_pretty(&raw)?)?;
+
+    let new_tokens = read_tokens(&raw)?;
+    let resp = fetch_usage_api(&new_tokens).await?;
+    parse_usage_response(resp).await
+}
+
+pub async fn fetch_usage() -> Result<Option<RateLimits>> {
+    let path = Tool::Codex.home_dir()?.join("auth.json");
+    if !path.exists() {
+        return Ok(None);
+    }
+    fetch_from_auth_path(&path).await
+}
+
+pub async fn fetch_usage_from_auth(path: &Path) -> Result<Option<RateLimits>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    fetch_from_auth_path(path).await
 }

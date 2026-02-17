@@ -14,6 +14,7 @@ use console::{Key, Term};
 use dialoguer::{Confirm, Input, Select};
 
 use cli::{Cli, Command};
+use codex::usage::RateLimits;
 use display::{DisplayMode, format_usage_line};
 use tool::Tool;
 
@@ -115,7 +116,7 @@ async fn cmd_interactive() -> Result<()> {
 async fn prefetch_usage(tool: Tool, profiles: &[String]) -> HashMap<String, Vec<String>> {
     match tool {
         Tool::Claude => prefetch_claude_usage().await,
-        Tool::Codex => prefetch_codex_usage(profiles),
+        Tool::Codex => prefetch_codex_usage(profiles).await,
     }
 }
 
@@ -148,23 +149,7 @@ async fn prefetch_claude_usage() -> HashMap<String, Vec<String>> {
         .collect()
 }
 
-fn codex_session_boundaries() -> (Option<std::time::SystemTime>, Option<std::time::SystemTime>) {
-    let since = Tool::Codex
-        .current_file()
-        .ok()
-        .and_then(|p| p.metadata().ok())
-        .and_then(|m| m.modified().ok());
-    let cutoff = Tool::Codex
-        .current_profile()
-        .ok()
-        .flatten()
-        .and_then(|name| Tool::Codex.profile_dir(&name).ok())
-        .and_then(|dir| dir.join("_session_cutoff").metadata().ok())
-        .and_then(|m| m.modified().ok());
-    (since, cutoff)
-}
-
-fn codex_usage_lines(result: Result<Option<codex::usage::RateLimits>>) -> Vec<String> {
+fn codex_usage_lines(result: Result<Option<RateLimits>>) -> Vec<String> {
     match result {
         Ok(Some(limits)) => {
             let mut lines = Vec::new();
@@ -195,29 +180,26 @@ fn codex_usage_lines(result: Result<Option<codex::usage::RateLimits>>) -> Vec<St
     }
 }
 
-fn prefetch_codex_usage(profiles: &[String]) -> HashMap<String, Vec<String>> {
+async fn prefetch_codex_usage(profiles: &[String]) -> HashMap<String, Vec<String>> {
     let current = Tool::Codex.current_profile().ok().flatten();
-    let (since, cutoff) = codex_session_boundaries();
+    let mut results = HashMap::new();
 
-    profiles
-        .iter()
-        .map(|p| {
-            let lines = if current.as_deref() == Some(p.as_str()) {
-                codex_usage_lines(codex::usage::fetch_usage(since, cutoff))
-            } else {
-                let profile_cutoff = Tool::Codex
-                    .profile_dir(p)
-                    .ok()
-                    .and_then(|dir| dir.join("_session_cutoff").metadata().ok())
-                    .and_then(|m| m.modified().ok());
-                match profile_cutoff {
-                    Some(c) => codex_usage_lines(codex::usage::fetch_usage(None, Some(c))),
-                    None => vec![],
+    for p in profiles {
+        let lines = if current.as_deref() == Some(p.as_str()) {
+            codex_usage_lines(codex::usage::fetch_usage().await)
+        } else {
+            match Tool::Codex.profile_dir(p) {
+                Ok(dir) => {
+                    let auth_path = dir.join("auth.json");
+                    codex_usage_lines(codex::usage::fetch_usage_from_auth(&auth_path).await)
                 }
-            };
-            (p.clone(), lines)
-        })
-        .collect()
+                Err(e) => vec![format!("Error: {}", e)],
+            }
+        };
+        results.insert(p.clone(), lines);
+    }
+
+    results
 }
 
 struct CursorGuard<'a>(&'a Term);
@@ -338,7 +320,7 @@ async fn print_usage_for_tool(tool: Tool) {
 
     match tool {
         Tool::Claude => print_claude_usage(&label).await,
-        Tool::Codex => print_codex_usage(&label),
+        Tool::Codex => print_codex_usage(&label).await,
     }
 }
 
@@ -377,10 +359,8 @@ async fn print_claude_usage(label: &str) {
     println!();
 }
 
-fn print_codex_usage(label: &str) {
-    let (since, cutoff) = codex_session_boundaries();
-
-    match codex::usage::fetch_usage(since, cutoff) {
+async fn print_codex_usage(label: &str) {
+    match codex::usage::fetch_usage().await {
         Ok(Some(limits)) => {
             println!("{}", label);
             if let Some(primary) = &limits.primary {
