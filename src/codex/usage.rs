@@ -79,12 +79,19 @@ fn find_session_files(
         if since.is_some() || cutoff.is_some() {
             files.retain(|p| {
                 p.metadata().and_then(|m| m.modified()).is_ok_and(|mtime| {
-                    since.is_none_or(|s| mtime >= s) || cutoff.is_some_and(|c| mtime <= c)
+                    match (since, cutoff) {
+                        (Some(s), Some(c)) => mtime >= s || mtime <= c,
+                        (Some(s), None) => mtime >= s,
+                        (None, Some(c)) => mtime <= c,
+                        (None, None) => true, // unreachable (outer if guard)
+                    }
                 })
             });
         }
 
-        return Ok(files);
+        if !files.is_empty() {
+            return Ok(files);
+        }
     }
 
     Ok(vec![])

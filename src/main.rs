@@ -164,6 +164,37 @@ fn codex_session_boundaries() -> (Option<std::time::SystemTime>, Option<std::tim
     (since, cutoff)
 }
 
+fn codex_usage_lines(result: Result<Option<codex::usage::RateLimits>>) -> Vec<String> {
+    match result {
+        Ok(Some(limits)) => {
+            let mut lines = Vec::new();
+            if let Some(primary) = &limits.primary {
+                lines.push(format_usage_line(
+                    "5-hour",
+                    primary.used_percent,
+                    primary.resets_at_utc(),
+                    &DisplayMode::Left,
+                ));
+            }
+            if let Some(secondary) = &limits.secondary {
+                lines.push(format_usage_line(
+                    "Weekly",
+                    secondary.used_percent,
+                    secondary.resets_at_utc(),
+                    &DisplayMode::Left,
+                ));
+            }
+            if lines.is_empty() {
+                vec!["No usage data available".to_string()]
+            } else {
+                lines
+            }
+        }
+        Ok(None) => vec!["No usage data available".to_string()],
+        Err(e) => vec![format!("Error: {}", e)],
+    }
+}
+
 fn prefetch_codex_usage(profiles: &[String]) -> HashMap<String, Vec<String>> {
     let current = Tool::Codex.current_profile().ok().flatten();
     let (since, cutoff) = codex_session_boundaries();
@@ -172,36 +203,17 @@ fn prefetch_codex_usage(profiles: &[String]) -> HashMap<String, Vec<String>> {
         .iter()
         .map(|p| {
             let lines = if current.as_deref() == Some(p.as_str()) {
-                match codex::usage::fetch_usage(since, cutoff) {
-                    Ok(Some(limits)) => {
-                        let mut lines = Vec::new();
-                        if let Some(primary) = &limits.primary {
-                            lines.push(format_usage_line(
-                                "5-hour",
-                                primary.used_percent,
-                                primary.resets_at_utc(),
-                                &DisplayMode::Left,
-                            ));
-                        }
-                        if let Some(secondary) = &limits.secondary {
-                            lines.push(format_usage_line(
-                                "Weekly",
-                                secondary.used_percent,
-                                secondary.resets_at_utc(),
-                                &DisplayMode::Left,
-                            ));
-                        }
-                        if lines.is_empty() {
-                            vec!["No usage data available".to_string()]
-                        } else {
-                            lines
-                        }
-                    }
-                    Ok(None) => vec!["No usage data available".to_string()],
-                    Err(e) => vec![format!("Error: {}", e)],
-                }
+                codex_usage_lines(codex::usage::fetch_usage(since, cutoff))
             } else {
-                vec![]
+                let profile_cutoff = Tool::Codex
+                    .profile_dir(p)
+                    .ok()
+                    .and_then(|dir| dir.join("_session_cutoff").metadata().ok())
+                    .and_then(|m| m.modified().ok());
+                match profile_cutoff {
+                    Some(c) => codex_usage_lines(codex::usage::fetch_usage(None, Some(c))),
+                    None => vec![],
+                }
             };
             (p.clone(), lines)
         })
