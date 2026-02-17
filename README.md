@@ -33,14 +33,14 @@ cargo run -- <command>
 ## Commands
 
 ```bash
-aip                     # interactive mode (select tool + profile)
+aip login               # run tool login and save to selected profile
 aip save [tool] [name]  # save current credentials to a profile
-aip usage               # show usage for current Claude and Codex profiles
 aip list                # list all profiles
 aip current             # show current profile per tool
-aip delete [tool] [name] # delete a profile
+aip                     # interactive mode (select tool + profile)
 aip switch <tool> <name> # switch profile without prompts
-aip login               # run tool login and save to selected profile
+aip usage               # show usage for current Claude and Codex profiles
+aip delete [tool] [name] # delete a profile
 ```
 
 `tool` values: `claude` or `codex`
