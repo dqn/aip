@@ -7,6 +7,9 @@ mod tool;
 use std::collections::HashMap;
 use std::fs;
 use std::process::Command as ProcessCommand;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 use anyhow::{Result, anyhow};
 use clap::Parser;
@@ -37,6 +40,32 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+async fn with_spinner<F, T>(message: &str, future: F) -> T
+where
+    F: std::future::Future<Output = T>,
+{
+    let message = message.to_string();
+    let running = Arc::new(AtomicBool::new(true));
+    let running_clone = running.clone();
+
+    let handle = tokio::spawn(async move {
+        let frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+        let mut i = 0;
+        while running_clone.load(Ordering::Relaxed) {
+            eprint!("\r{} {}", frames[i % frames.len()], message);
+            i += 1;
+            tokio::time::sleep(Duration::from_millis(80)).await;
+        }
+        let term = Term::stderr();
+        let _ = term.clear_line();
+    });
+
+    let result = future.await;
+    running.store(false, Ordering::Relaxed);
+    let _ = handle.await;
+    result
 }
 
 fn select_tool() -> Result<Option<Tool>> {
@@ -91,7 +120,7 @@ async fn cmd_interactive() -> Result<()> {
         let current = tool.current_profile()?;
 
         // Prefetch usage for all profiles
-        let usage_cache = prefetch_usage(tool, &profiles).await;
+        let usage_cache = with_spinner("Fetching usage...", prefetch_usage(tool, &profiles)).await;
 
         // Select profile with usage preview
         let Some(selection) =
@@ -315,27 +344,33 @@ fn cmd_save(tool_arg: Option<String>, profile_arg: Option<String>) -> Result<()>
 }
 
 async fn cmd_usage() -> Result<()> {
-    for tool in Tool::ALL {
-        print_usage_for_tool(tool).await;
-    }
+    let (claude_result, codex_result) = with_spinner("Fetching usage...", async {
+        tokio::join!(claude::usage::fetch_usage(), codex::usage::fetch_usage())
+    })
+    .await;
+
+    let claude_label = build_tool_label(Tool::Claude);
+    let codex_label = build_tool_label(Tool::Codex);
+
+    render_claude_usage(&claude_label, claude_result);
+    render_codex_usage(&codex_label, codex_result);
+
     Ok(())
 }
 
-async fn print_usage_for_tool(tool: Tool) {
+fn build_tool_label(tool: Tool) -> String {
     let current = tool.current_profile().ok().flatten();
-    let label = match &current {
+    match current {
         Some(name) => format!("{} [{}]", tool, name),
         None => format!("{}", tool),
-    };
-
-    match tool {
-        Tool::Claude => print_claude_usage(&label).await,
-        Tool::Codex => print_codex_usage(&label).await,
     }
 }
 
-async fn print_claude_usage(label: &str) {
-    match claude::usage::fetch_usage().await {
+fn render_claude_usage(
+    label: &str,
+    result: Result<(claude::usage::UsageResponse, claude::usage::ProfileInfo)>,
+) {
+    match result {
         Ok((usage, info)) => {
             let suffix = match info.plan_type.as_deref() {
                 Some(plan) => format!(" ({})", plan),
@@ -369,8 +404,8 @@ async fn print_claude_usage(label: &str) {
     println!();
 }
 
-async fn print_codex_usage(label: &str) {
-    match codex::usage::fetch_usage().await {
+fn render_codex_usage(label: &str, result: Result<Option<RateLimits>>) {
+    match result {
         Ok(Some(limits)) => {
             println!("{}", label);
             if let Some(primary) = &limits.primary {

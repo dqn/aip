@@ -189,28 +189,37 @@ pub async fn fetch_all_profiles_usage() -> HashMap<String, Result<(UsageResponse
     };
     let current = Tool::Claude.current_profile().ok().flatten();
 
-    let mut results = HashMap::new();
+    let mut handles = Vec::new();
 
-    for profile in &profiles {
-        let result = if current.as_deref() == Some(profile.as_str()) {
-            fetch_usage().await
-        } else {
-            match Tool::Claude.profile_dir(profile) {
-                Ok(dir) => {
-                    let creds_path = dir.join("credentials.json");
-                    match get_access_token_from_credentials(&creds_path).await {
-                        Ok((token, info)) => match fetch_usage_with_token(&token).await {
-                            Ok(usage) => Ok((usage, info)),
+    for profile in profiles {
+        let is_current = current.as_deref() == Some(profile.as_str());
+        handles.push(tokio::spawn(async move {
+            let result = if is_current {
+                fetch_usage().await
+            } else {
+                match Tool::Claude.profile_dir(&profile) {
+                    Ok(dir) => {
+                        let creds_path = dir.join("credentials.json");
+                        match get_access_token_from_credentials(&creds_path).await {
+                            Ok((token, info)) => match fetch_usage_with_token(&token).await {
+                                Ok(usage) => Ok((usage, info)),
+                                Err(e) => Err(e),
+                            },
                             Err(e) => Err(e),
-                        },
-                        Err(e) => Err(e),
+                        }
                     }
+                    Err(e) => Err(e),
                 }
-                Err(e) => Err(e),
-            }
-        };
-        results.insert(profile.clone(), result);
+            };
+            (profile, result)
+        }));
     }
 
+    let mut results = HashMap::new();
+    for handle in handles {
+        if let Ok((profile, result)) = handle.await {
+            results.insert(profile, result);
+        }
+    }
     results
 }
