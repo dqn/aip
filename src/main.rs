@@ -182,23 +182,33 @@ fn codex_usage_lines(result: Result<Option<RateLimits>>) -> Vec<String> {
 
 async fn prefetch_codex_usage(profiles: &[String]) -> HashMap<String, Vec<String>> {
     let current = Tool::Codex.current_profile().ok().flatten();
-    let mut results = HashMap::new();
 
+    let mut handles = Vec::new();
     for p in profiles {
-        let lines = if current.as_deref() == Some(p.as_str()) {
-            codex_usage_lines(codex::usage::fetch_usage().await)
-        } else {
-            match Tool::Codex.profile_dir(p) {
-                Ok(dir) => {
-                    let auth_path = dir.join("auth.json");
-                    codex_usage_lines(codex::usage::fetch_usage_from_auth(&auth_path).await)
+        let p = p.clone();
+        let is_current = current.as_deref() == Some(p.as_str());
+        handles.push(tokio::spawn(async move {
+            let result = if is_current {
+                codex::usage::fetch_usage().await
+            } else {
+                match Tool::Codex.profile_dir(&p) {
+                    Ok(dir) => {
+                        let auth_path = dir.join("auth.json");
+                        codex::usage::fetch_usage_from_auth(&auth_path).await
+                    }
+                    Err(e) => Err(e),
                 }
-                Err(e) => vec![format!("Error: {}", e)],
-            }
-        };
-        results.insert(p.clone(), lines);
+            };
+            (p, codex_usage_lines(result))
+        }));
     }
 
+    let mut results = HashMap::new();
+    for handle in handles {
+        if let Ok((p, lines)) = handle.await {
+            results.insert(p, lines);
+        }
+    }
     results
 }
 
