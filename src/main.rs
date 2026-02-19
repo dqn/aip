@@ -569,15 +569,17 @@ async fn cmd_usage() -> Result<()> {
             .map(|(_, p, _)| p.clone())
             .unwrap_or_default();
 
-        // Spawn async fetch tasks
-        let claude_handle = tokio::spawn(async move { prefetch_claude_usage().await });
-        let codex_handle = {
-            let profiles = codex_profiles.clone();
-            tokio::spawn(async move { prefetch_codex_usage(&profiles).await })
-        };
+        // Create fetch futures (run on current task, not spawned)
+        let claude_future = prefetch_claude_usage();
+        let codex_future = prefetch_codex_usage(&codex_profiles);
+        tokio::pin!(claude_future);
+        tokio::pin!(codex_future);
 
         // Start with both tools pending, render immediately (shows cached data or loading)
         let mut pending_tools: HashSet<Tool> = HashSet::from([Tool::Claude, Tool::Codex]);
+        let mut claude_done = false;
+        let mut codex_done = false;
+
         render_monitor(
             &term,
             &mut rendered_lines,
@@ -586,12 +588,33 @@ async fn cmd_usage() -> Result<()> {
             &pending_tools,
         )?;
 
-        // Poll until all fetches complete
-        let mut claude_handle = Some(claude_handle);
-        let mut codex_handle = Some(codex_handle);
-
-        while !pending_tools.is_empty() {
+        // Await fetches incrementally via select
+        while !(claude_done && codex_done) {
             tokio::select! {
+                cache = &mut claude_future, if !claude_done => {
+                    usage_caches.insert(Tool::Claude, cache);
+                    pending_tools.remove(&Tool::Claude);
+                    claude_done = true;
+                    render_monitor(
+                        &term,
+                        &mut rendered_lines,
+                        &tool_profiles,
+                        &usage_caches,
+                        &pending_tools,
+                    )?;
+                }
+                cache = &mut codex_future, if !codex_done => {
+                    usage_caches.insert(Tool::Codex, cache);
+                    pending_tools.remove(&Tool::Codex);
+                    codex_done = true;
+                    render_monitor(
+                        &term,
+                        &mut rendered_lines,
+                        &tool_profiles,
+                        &usage_caches,
+                        &pending_tools,
+                    )?;
+                }
                 key_result = &mut key_task => {
                     let key = key_result
                         .map_err(|e| anyhow!("failed to read key input: {}", e))??;
@@ -603,43 +626,6 @@ async fn cmd_usage() -> Result<()> {
                         _ => {}
                     }
                     key_task = spawn_read_key_task();
-                }
-                _ = tokio::time::sleep(PREFETCH_POLL_INTERVAL) => {
-                    let mut changed = false;
-
-                    if let Some(handle) = &claude_handle {
-                        if handle.is_finished() {
-                            if let Some(h) = claude_handle.take() {
-                                if let Ok(cache) = h.await {
-                                    usage_caches.insert(Tool::Claude, cache);
-                                }
-                            }
-                            pending_tools.remove(&Tool::Claude);
-                            changed = true;
-                        }
-                    }
-
-                    if let Some(handle) = &codex_handle {
-                        if handle.is_finished() {
-                            if let Some(h) = codex_handle.take() {
-                                if let Ok(cache) = h.await {
-                                    usage_caches.insert(Tool::Codex, cache);
-                                }
-                            }
-                            pending_tools.remove(&Tool::Codex);
-                            changed = true;
-                        }
-                    }
-
-                    if changed {
-                        render_monitor(
-                            &term,
-                            &mut rendered_lines,
-                            &tool_profiles,
-                            &usage_caches,
-                            &pending_tools,
-                        )?;
-                    }
                 }
             }
         }
