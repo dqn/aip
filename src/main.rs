@@ -4,7 +4,7 @@ mod codex;
 mod display;
 mod tool;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::process::Command as ProcessCommand;
 use std::time::Duration;
@@ -449,13 +449,20 @@ async fn select_profile_with_usage(
 fn build_usage_monitor_lines(
     tool_profiles: &[(Tool, Vec<String>, Option<String>)],
     usage_caches: &HashMap<Tool, HashMap<String, Vec<String>>>,
+    pending_tools: &HashSet<Tool>,
 ) -> Vec<String> {
-    let timestamp = Local::now().format("%H:%M:%S");
     let mut lines = Vec::new();
-    lines.push(format!(
-        "Usage Monitor (5s refresh, ESC/q to quit)  Updated: {}",
-        timestamp
-    ));
+
+    let header = if pending_tools.is_empty() {
+        let timestamp = Local::now().format("%H:%M:%S");
+        format!(
+            "Usage Monitor (5s refresh, ESC/q to quit)  Updated: {}",
+            timestamp
+        )
+    } else {
+        "Usage Monitor (5s refresh, ESC/q to quit)  Refreshing...".to_string()
+    };
+    lines.push(header);
     lines.push(String::new());
 
     for (tool, profiles, current) in tool_profiles {
@@ -477,6 +484,8 @@ fn build_usage_monitor_lines(
                     for line in usage_lines {
                         lines.push(format!("    {}", line));
                     }
+                } else if pending_tools.contains(tool) {
+                    lines.push("    (loading...)".to_string());
                 } else {
                     lines.push("    (no data)".to_string());
                 }
@@ -514,17 +523,37 @@ fn cmd_save(tool_arg: Option<String>, profile_arg: Option<String>) -> Result<()>
     Ok(())
 }
 
+fn render_monitor(
+    term: &Term,
+    rendered_lines: &mut usize,
+    tool_profiles: &[(Tool, Vec<String>, Option<String>)],
+    usage_caches: &HashMap<Tool, HashMap<String, Vec<String>>>,
+    pending_tools: &HashSet<Tool>,
+) -> Result<()> {
+    if *rendered_lines > 0 {
+        term.clear_last_lines(*rendered_lines)?;
+    }
+
+    let lines = build_usage_monitor_lines(tool_profiles, usage_caches, pending_tools);
+    for line in &lines {
+        term.write_line(line)?;
+    }
+    *rendered_lines = lines.len();
+
+    Ok(())
+}
+
 async fn cmd_usage() -> Result<()> {
     let term = Term::stderr();
     term.hide_cursor()?;
     let _guard = CursorGuard(&term);
 
-    term.write_line("Fetching usage...")?;
-    let mut rendered_lines: usize = 1;
-
+    let mut rendered_lines: usize = 0;
+    let mut usage_caches: HashMap<Tool, HashMap<String, Vec<String>>> = HashMap::new();
     let mut key_task = spawn_read_key_task();
 
     loop {
+        // Reload tool profiles each cycle
         let tool_profiles: Vec<(Tool, Vec<String>, Option<String>)> = Tool::ALL
             .iter()
             .map(|&t| {
@@ -540,21 +569,91 @@ async fn cmd_usage() -> Result<()> {
             .map(|(_, p, _)| p.clone())
             .unwrap_or_default();
 
-        let (claude_cache, codex_cache) =
-            tokio::join!(prefetch_claude_usage(), prefetch_codex_usage(&codex_profiles));
+        // Spawn async fetch tasks
+        let claude_handle = tokio::spawn(async move { prefetch_claude_usage().await });
+        let codex_handle = {
+            let profiles = codex_profiles.clone();
+            tokio::spawn(async move { prefetch_codex_usage(&profiles).await })
+        };
 
-        let mut usage_caches: HashMap<Tool, HashMap<String, Vec<String>>> = HashMap::new();
-        usage_caches.insert(Tool::Claude, claude_cache);
-        usage_caches.insert(Tool::Codex, codex_cache);
+        // Start with both tools pending, render immediately (shows cached data or loading)
+        let mut pending_tools: HashSet<Tool> = HashSet::from([Tool::Claude, Tool::Codex]);
+        render_monitor(
+            &term,
+            &mut rendered_lines,
+            &tool_profiles,
+            &usage_caches,
+            &pending_tools,
+        )?;
 
-        term.clear_last_lines(rendered_lines)?;
+        // Poll until all fetches complete
+        let mut claude_handle = Some(claude_handle);
+        let mut codex_handle = Some(codex_handle);
 
-        let lines = build_usage_monitor_lines(&tool_profiles, &usage_caches);
-        for line in &lines {
-            term.write_line(line)?;
+        while !pending_tools.is_empty() {
+            tokio::select! {
+                key_result = &mut key_task => {
+                    let key = key_result
+                        .map_err(|e| anyhow!("failed to read key input: {}", e))??;
+                    match key {
+                        Key::Escape | Key::Char('q') => {
+                            term.clear_last_lines(rendered_lines)?;
+                            return Ok(());
+                        }
+                        _ => {}
+                    }
+                    key_task = spawn_read_key_task();
+                }
+                _ = tokio::time::sleep(PREFETCH_POLL_INTERVAL) => {
+                    let mut changed = false;
+
+                    if let Some(handle) = &claude_handle {
+                        if handle.is_finished() {
+                            if let Some(h) = claude_handle.take() {
+                                if let Ok(cache) = h.await {
+                                    usage_caches.insert(Tool::Claude, cache);
+                                }
+                            }
+                            pending_tools.remove(&Tool::Claude);
+                            changed = true;
+                        }
+                    }
+
+                    if let Some(handle) = &codex_handle {
+                        if handle.is_finished() {
+                            if let Some(h) = codex_handle.take() {
+                                if let Ok(cache) = h.await {
+                                    usage_caches.insert(Tool::Codex, cache);
+                                }
+                            }
+                            pending_tools.remove(&Tool::Codex);
+                            changed = true;
+                        }
+                    }
+
+                    if changed {
+                        render_monitor(
+                            &term,
+                            &mut rendered_lines,
+                            &tool_profiles,
+                            &usage_caches,
+                            &pending_tools,
+                        )?;
+                    }
+                }
+            }
         }
-        rendered_lines = lines.len();
 
+        // All data fetched — render final "Updated" state
+        render_monitor(
+            &term,
+            &mut rendered_lines,
+            &tool_profiles,
+            &usage_caches,
+            &pending_tools,
+        )?;
+
+        // Wait for refresh interval or quit key
         loop {
             tokio::select! {
                 key_result = &mut key_task => {
@@ -774,7 +873,7 @@ mod tests {
         ];
         let usage_caches = HashMap::new();
 
-        let lines = build_usage_monitor_lines(&tool_profiles, &usage_caches);
+        let lines = build_usage_monitor_lines(&tool_profiles, &usage_caches, &HashSet::new());
 
         let no_profiles_count = lines.iter().filter(|l| l.contains("(no profiles)")).count();
         assert_eq!(no_profiles_count, 2);
@@ -789,7 +888,7 @@ mod tests {
         )];
         let usage_caches = HashMap::new();
 
-        let lines = build_usage_monitor_lines(&tool_profiles, &usage_caches);
+        let lines = build_usage_monitor_lines(&tool_profiles, &usage_caches, &HashSet::new());
 
         assert!(lines.iter().any(|l| l.contains("personal *")));
         assert!(!lines.iter().any(|l| l.contains("work *")));
@@ -804,7 +903,7 @@ mod tests {
         )];
         let usage_caches = HashMap::new();
 
-        let lines = build_usage_monitor_lines(&tool_profiles, &usage_caches);
+        let lines = build_usage_monitor_lines(&tool_profiles, &usage_caches, &HashSet::new());
 
         assert!(lines.iter().any(|l| l.contains("(no data)")));
     }
@@ -824,10 +923,50 @@ mod tests {
         let mut usage_caches = HashMap::new();
         usage_caches.insert(Tool::Claude, claude_cache);
 
-        let lines = build_usage_monitor_lines(&tool_profiles, &usage_caches);
+        let lines = build_usage_monitor_lines(&tool_profiles, &usage_caches, &HashSet::new());
 
         assert!(lines.iter().any(|l| l.contains("60.0% used")));
         assert!(!lines.iter().any(|l| l.contains("(no data)")));
+    }
+
+    #[test]
+    fn build_usage_monitor_lines_shows_loading_when_tool_pending() {
+        let tool_profiles = vec![(
+            Tool::Claude,
+            vec!["personal".to_string()],
+            Some("personal".to_string()),
+        )];
+        let usage_caches = HashMap::new();
+        let pending_tools = HashSet::from([Tool::Claude]);
+
+        let lines = build_usage_monitor_lines(&tool_profiles, &usage_caches, &pending_tools);
+
+        assert!(lines.iter().any(|l| l.contains("(loading...)")));
+        assert!(!lines.iter().any(|l| l.contains("(no data)")));
+    }
+
+    #[test]
+    fn build_usage_monitor_lines_header_shows_refreshing_when_pending() {
+        let tool_profiles = vec![(Tool::Claude, vec![], None)];
+        let usage_caches = HashMap::new();
+        let pending_tools = HashSet::from([Tool::Claude]);
+
+        let lines = build_usage_monitor_lines(&tool_profiles, &usage_caches, &pending_tools);
+
+        assert!(lines[0].contains("Refreshing..."));
+        assert!(!lines[0].contains("Updated:"));
+    }
+
+    #[test]
+    fn build_usage_monitor_lines_header_shows_updated_when_not_pending() {
+        let tool_profiles = vec![(Tool::Claude, vec![], None)];
+        let usage_caches = HashMap::new();
+        let pending_tools = HashSet::new();
+
+        let lines = build_usage_monitor_lines(&tool_profiles, &usage_caches, &pending_tools);
+
+        assert!(lines[0].contains("Updated:"));
+        assert!(!lines[0].contains("Refreshing..."));
     }
 
     #[tokio::test]
