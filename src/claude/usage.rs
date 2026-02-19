@@ -48,7 +48,6 @@ pub struct UsageWindow {
 pub struct ProfileInfo {
     #[allow(dead_code)]
     pub organization_name: Option<String>,
-    #[allow(dead_code)]
     pub plan_type: Option<String>,
 }
 

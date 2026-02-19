@@ -48,7 +48,6 @@ struct TokenData {
 struct RefreshResponse {
     access_token: Option<String>,
     refresh_token: Option<String>,
-    #[allow(dead_code)]
     id_token: Option<String>,
 }
 

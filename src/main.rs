@@ -51,9 +51,17 @@ struct StartupUsagePrefetch {
     codex: PrefetchState,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+struct ProfileUsageCache {
+    lines: Vec<String>,
+    plan_type: Option<String>,
+}
+
+type UsageCache = HashMap<String, ProfileUsageCache>;
+
 enum PrefetchState {
-    Pending(tokio::task::JoinHandle<HashMap<String, Vec<String>>>),
-    Ready(HashMap<String, Vec<String>>),
+    Pending(tokio::task::JoinHandle<UsageCache>),
+    Ready(UsageCache),
     Failed,
 }
 
@@ -66,7 +74,7 @@ impl StartupUsagePrefetch {
         }
     }
 
-    async fn usage_cache(&mut self, tool: Tool) -> HashMap<String, Vec<String>> {
+    async fn usage_cache(&mut self, tool: Tool) -> UsageCache {
         self.state_mut(tool)
             .usage_cache_with_timeout(STARTUP_PREFETCH_TIMEOUT)
             .await
@@ -81,10 +89,7 @@ impl StartupUsagePrefetch {
 }
 
 impl PrefetchState {
-    async fn usage_cache_with_timeout(
-        &mut self,
-        timeout: Duration,
-    ) -> HashMap<String, Vec<String>> {
+    async fn usage_cache_with_timeout(&mut self, timeout: Duration) -> UsageCache {
         match self {
             PrefetchState::Ready(cache) => cache.clone(),
             PrefetchState::Failed => HashMap::new(),
@@ -107,10 +112,7 @@ impl PrefetchState {
     }
 }
 
-fn spawn_prefetch_task(
-    tool: Tool,
-    profiles: Vec<String>,
-) -> tokio::task::JoinHandle<HashMap<String, Vec<String>>> {
+fn spawn_prefetch_task(tool: Tool, profiles: Vec<String>) -> tokio::task::JoinHandle<UsageCache> {
     tokio::spawn(async move { prefetch_usage(tool, &profiles).await })
 }
 
@@ -195,21 +197,21 @@ async fn cmd_interactive() -> Result<()> {
     }
 }
 
-async fn prefetch_usage(tool: Tool, profiles: &[String]) -> HashMap<String, Vec<String>> {
+async fn prefetch_usage(tool: Tool, profiles: &[String]) -> UsageCache {
     match tool {
         Tool::Claude => prefetch_claude_usage().await,
         Tool::Codex => prefetch_codex_usage(profiles).await,
     }
 }
 
-async fn prefetch_claude_usage() -> HashMap<String, Vec<String>> {
+async fn prefetch_claude_usage() -> UsageCache {
     let results = claude::usage::fetch_all_profiles_usage().await;
     results
         .into_iter()
         .map(|(profile, result)| {
-            let lines = match result {
-                Ok((usage, _info)) => {
-                    vec![
+            let entry = match result {
+                Ok((usage, info)) => ProfileUsageCache {
+                    lines: vec![
                         format_usage_line(
                             "5-hour",
                             usage.five_hour.utilization,
@@ -222,11 +224,15 @@ async fn prefetch_claude_usage() -> HashMap<String, Vec<String>> {
                             usage.seven_day.resets_at,
                             &DisplayMode::Used,
                         ),
-                    ]
-                }
-                Err(e) => vec![format!("Error: {}", e)],
+                    ],
+                    plan_type: info.plan_type,
+                },
+                Err(e) => ProfileUsageCache {
+                    lines: vec![format!("Error: {}", e)],
+                    plan_type: None,
+                },
             };
-            (profile, lines)
+            (profile, entry)
         })
         .collect()
 }
@@ -262,7 +268,7 @@ fn codex_usage_lines(result: Result<Option<RateLimits>>) -> Vec<String> {
     }
 }
 
-async fn prefetch_codex_usage(profiles: &[String]) -> HashMap<String, Vec<String>> {
+async fn prefetch_codex_usage(profiles: &[String]) -> UsageCache {
     let current = Tool::Codex.current_profile().ok().flatten();
 
     let mut handles = Vec::new();
@@ -281,14 +287,20 @@ async fn prefetch_codex_usage(profiles: &[String]) -> HashMap<String, Vec<String
                     Err(e) => Err(e),
                 }
             };
-            (p, codex_usage_lines(result))
+            (
+                p,
+                ProfileUsageCache {
+                    lines: codex_usage_lines(result),
+                    plan_type: None,
+                },
+            )
         }));
     }
 
     let mut results = HashMap::new();
     for handle in handles {
-        if let Ok((p, lines)) = handle.await {
-            results.insert(p, lines);
+        if let Ok((p, entry)) = handle.await {
+            results.insert(p, entry);
         }
     }
     results
@@ -307,7 +319,7 @@ fn spawn_read_key_task() -> tokio::task::JoinHandle<std::io::Result<Key>> {
 }
 
 async fn refresh_usage_cache(
-    usage_cache: &mut HashMap<String, Vec<String>>,
+    usage_cache: &mut UsageCache,
     prefetch_state: &mut PrefetchState,
 ) -> bool {
     let was_pending = prefetch_state.is_pending();
@@ -331,7 +343,7 @@ async fn refresh_usage_cache(
 async fn select_profile_with_usage(
     profiles: &[String],
     current: Option<&str>,
-    usage_cache: &mut HashMap<String, Vec<String>>,
+    usage_cache: &mut UsageCache,
     prefetch_state: &mut PrefetchState,
 ) -> Result<Option<usize>> {
     let term = Term::stderr();
@@ -369,12 +381,12 @@ async fn select_profile_with_usage(
                 lines += 1;
             }
 
-            if let Some(usage_lines) = usage_cache.get(&profiles[selected])
-                && !usage_lines.is_empty()
+            if let Some(entry) = usage_cache.get(&profiles[selected])
+                && !entry.lines.is_empty()
             {
                 term.write_line("")?;
                 lines += 1;
-                for line in usage_lines {
+                for line in &entry.lines {
                     term.write_line(line)?;
                     lines += 1;
                 }
@@ -446,9 +458,17 @@ async fn select_profile_with_usage(
     }
 }
 
+fn capitalize_first(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        None => String::new(),
+        Some(c) => c.to_uppercase().to_string() + chars.as_str(),
+    }
+}
+
 fn build_usage_monitor_lines(
     tool_profiles: &[(Tool, Vec<String>, Option<String>)],
-    usage_caches: &HashMap<Tool, HashMap<String, Vec<String>>>,
+    usage_caches: &HashMap<Tool, UsageCache>,
     pending_tools: &HashSet<Tool>,
 ) -> Vec<String> {
     let mut lines = Vec::new();
@@ -478,10 +498,15 @@ fn build_usage_monitor_lines(
                 } else {
                     ""
                 };
-                lines.push(format!("  {}{}", profile, marker));
+                let plan_suffix = cache
+                    .and_then(|c| c.get(profile))
+                    .and_then(|entry| entry.plan_type.as_deref())
+                    .map(|pt| format!(" ({})", capitalize_first(pt)))
+                    .unwrap_or_default();
+                lines.push(format!("  {}{}{}", profile, marker, plan_suffix));
 
-                if let Some(usage_lines) = cache.and_then(|c| c.get(profile)) {
-                    for line in usage_lines {
+                if let Some(entry) = cache.and_then(|c| c.get(profile)) {
+                    for line in &entry.lines {
                         lines.push(format!("    {}", line));
                     }
                 } else if pending_tools.contains(tool) {
@@ -527,7 +552,7 @@ fn render_monitor(
     term: &Term,
     rendered_lines: &mut usize,
     tool_profiles: &[(Tool, Vec<String>, Option<String>)],
-    usage_caches: &HashMap<Tool, HashMap<String, Vec<String>>>,
+    usage_caches: &HashMap<Tool, UsageCache>,
     pending_tools: &HashSet<Tool>,
 ) -> Result<()> {
     if *rendered_lines > 0 {
@@ -549,7 +574,7 @@ async fn cmd_usage() -> Result<()> {
     let _guard = CursorGuard(&term);
 
     let mut rendered_lines: usize = 0;
-    let mut usage_caches: HashMap<Tool, HashMap<String, Vec<String>>> = HashMap::new();
+    let mut usage_caches: HashMap<Tool, UsageCache> = HashMap::new();
     let mut key_task = spawn_read_key_task();
 
     loop {
@@ -801,10 +826,17 @@ mod tests {
     use super::*;
     use tokio::time::sleep;
 
+    fn make_entry(lines: Vec<String>, plan_type: Option<&str>) -> ProfileUsageCache {
+        ProfileUsageCache {
+            lines,
+            plan_type: plan_type.map(String::from),
+        }
+    }
+
     #[tokio::test]
     async fn prefetch_state_returns_ready_cache_immediately() {
         let mut cache = HashMap::new();
-        cache.insert("p1".to_string(), vec!["ok".to_string()]);
+        cache.insert("p1".to_string(), make_entry(vec!["ok".to_string()], None));
         let mut state = PrefetchState::Ready(cache.clone());
 
         let actual = state
@@ -818,8 +850,8 @@ mod tests {
     async fn prefetch_state_returns_empty_on_timeout_then_returns_result() {
         let handle = tokio::spawn(async {
             sleep(Duration::from_millis(30)).await;
-            let mut cache = HashMap::new();
-            cache.insert("p1".to_string(), vec!["ok".to_string()]);
+            let mut cache: UsageCache = HashMap::new();
+            cache.insert("p1".to_string(), make_entry(vec!["ok".to_string()], None));
             cache
         });
         let mut state = PrefetchState::Pending(handle);
@@ -832,7 +864,10 @@ mod tests {
         let second = state
             .usage_cache_with_timeout(Duration::from_millis(50))
             .await;
-        assert_eq!(second.get("p1"), Some(&vec!["ok".to_string()]));
+        assert_eq!(
+            second.get("p1"),
+            Some(&make_entry(vec!["ok".to_string()], None))
+        );
     }
 
     #[tokio::test]
@@ -840,7 +875,7 @@ mod tests {
         let handle = tokio::spawn(async {
             panic!("boom");
             #[allow(unreachable_code)]
-            HashMap::<String, Vec<String>>::new()
+            UsageCache::new()
         });
         let mut state = PrefetchState::Pending(handle);
 
@@ -898,10 +933,10 @@ mod tests {
             vec!["personal".to_string()],
             Some("personal".to_string()),
         )];
-        let mut claude_cache = HashMap::new();
+        let mut claude_cache: UsageCache = HashMap::new();
         claude_cache.insert(
             "personal".to_string(),
-            vec!["5-hour  60.0% used".to_string()],
+            make_entry(vec!["5-hour  60.0% used".to_string()], None),
         );
         let mut usage_caches = HashMap::new();
         usage_caches.insert(Tool::Claude, claude_cache);
@@ -952,16 +987,64 @@ mod tests {
         assert!(!lines[0].contains("Refreshing..."));
     }
 
+    #[test]
+    fn build_usage_monitor_lines_shows_plan_type() {
+        let tool_profiles = vec![(
+            Tool::Claude,
+            vec!["personal".to_string()],
+            Some("personal".to_string()),
+        )];
+        let mut claude_cache: UsageCache = HashMap::new();
+        claude_cache.insert(
+            "personal".to_string(),
+            make_entry(vec!["5-hour  60.0% used".to_string()], Some("pro")),
+        );
+        let mut usage_caches = HashMap::new();
+        usage_caches.insert(Tool::Claude, claude_cache);
+
+        let lines = build_usage_monitor_lines(&tool_profiles, &usage_caches, &HashSet::new());
+
+        assert!(lines.iter().any(|l| l.contains("personal * (Pro)")));
+    }
+
+    #[test]
+    fn build_usage_monitor_lines_hides_plan_type_when_none() {
+        let tool_profiles = vec![(
+            Tool::Claude,
+            vec!["personal".to_string()],
+            Some("personal".to_string()),
+        )];
+        let mut claude_cache: UsageCache = HashMap::new();
+        claude_cache.insert(
+            "personal".to_string(),
+            make_entry(vec!["5-hour  60.0% used".to_string()], None),
+        );
+        let mut usage_caches = HashMap::new();
+        usage_caches.insert(Tool::Claude, claude_cache);
+
+        let lines = build_usage_monitor_lines(&tool_profiles, &usage_caches, &HashSet::new());
+
+        let profile_line = lines.iter().find(|l| l.contains("personal *")).unwrap();
+        assert!(!profile_line.contains("("));
+    }
+
+    #[test]
+    fn capitalize_first_capitalizes_first_char() {
+        assert_eq!(capitalize_first("pro"), "Pro");
+        assert_eq!(capitalize_first(""), "");
+        assert_eq!(capitalize_first("Pro"), "Pro");
+    }
+
     #[tokio::test]
     async fn refresh_usage_cache_updates_when_prefetch_completes() {
         let handle = tokio::spawn(async {
             sleep(Duration::from_millis(30)).await;
-            let mut cache = HashMap::new();
-            cache.insert("p1".to_string(), vec!["ok".to_string()]);
+            let mut cache: UsageCache = HashMap::new();
+            cache.insert("p1".to_string(), make_entry(vec!["ok".to_string()], None));
             cache
         });
         let mut state = PrefetchState::Pending(handle);
-        let mut cache = HashMap::new();
+        let mut cache: UsageCache = HashMap::new();
 
         let first = refresh_usage_cache(&mut cache, &mut state).await;
         assert!(!first);
@@ -971,6 +1054,9 @@ mod tests {
 
         let second = refresh_usage_cache(&mut cache, &mut state).await;
         assert!(second);
-        assert_eq!(cache.get("p1"), Some(&vec!["ok".to_string()]));
+        assert_eq!(
+            cache.get("p1"),
+            Some(&make_entry(vec!["ok".to_string()], None))
+        );
     }
 }
