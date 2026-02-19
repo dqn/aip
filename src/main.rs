@@ -853,10 +853,7 @@ mod tests {
 
     #[test]
     fn build_usage_monitor_lines_shows_no_profiles_when_empty() {
-        let tool_profiles = vec![
-            (Tool::Claude, vec![], None),
-            (Tool::Codex, vec![], None),
-        ];
+        let tool_profiles = vec![(Tool::Claude, vec![], None), (Tool::Codex, vec![], None)];
         let usage_caches = HashMap::new();
 
         let lines = build_usage_monitor_lines(&tool_profiles, &usage_caches, &HashSet::new());

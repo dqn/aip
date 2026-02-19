@@ -156,7 +156,10 @@ mod tests {
     fn normalize_short_version_flag_converts_short_help_to_long_help() {
         let normalized = normalize_short_version_flag(["aip", "-h"]);
 
-        assert_eq!(normalized, vec![OsString::from("aip"), OsString::from("--help"),]);
+        assert_eq!(
+            normalized,
+            vec![OsString::from("aip"), OsString::from("--help"),]
+        );
     }
 
     #[test]
