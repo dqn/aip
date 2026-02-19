@@ -7,11 +7,10 @@ mod tool;
 use std::collections::HashMap;
 use std::fs;
 use std::process::Command as ProcessCommand;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::{Result, anyhow};
+use chrono::Local;
 use clap::Parser;
 use console::{Key, Term};
 use dialoguer::{Confirm, Input, Select};
@@ -42,35 +41,10 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-async fn with_spinner<F, T>(message: &str, future: F) -> T
-where
-    F: std::future::Future<Output = T>,
-{
-    let message = message.to_string();
-    let running = Arc::new(AtomicBool::new(true));
-    let running_clone = running.clone();
-
-    let handle = tokio::spawn(async move {
-        let frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-        let mut i = 0;
-        while running_clone.load(Ordering::Relaxed) {
-            eprint!("\r{} {}", frames[i % frames.len()], message);
-            i += 1;
-            tokio::time::sleep(Duration::from_millis(80)).await;
-        }
-        let term = Term::stderr();
-        let _ = term.clear_line();
-    });
-
-    let result = future.await;
-    running.store(false, Ordering::Relaxed);
-    let _ = handle.await;
-    result
-}
-
 const STARTUP_PREFETCH_TIMEOUT: Duration = Duration::from_millis(250);
 const PREFETCH_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const PREFETCH_RECHECK_TIMEOUT: Duration = Duration::from_millis(1);
+const USAGE_MONITOR_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 
 struct StartupUsagePrefetch {
     claude: PrefetchState,
@@ -472,6 +446,49 @@ async fn select_profile_with_usage(
     }
 }
 
+fn build_usage_monitor_lines(
+    tool_profiles: &[(Tool, Vec<String>, Option<String>)],
+    usage_caches: &HashMap<Tool, HashMap<String, Vec<String>>>,
+) -> Vec<String> {
+    let timestamp = Local::now().format("%H:%M:%S");
+    let mut lines = Vec::new();
+    lines.push(format!(
+        "Usage Monitor (5s refresh, ESC/q to quit)  Updated: {}",
+        timestamp
+    ));
+    lines.push(String::new());
+
+    for (tool, profiles, current) in tool_profiles {
+        lines.push(format!("{}", tool));
+
+        if profiles.is_empty() {
+            lines.push("  (no profiles)".to_string());
+        } else {
+            let cache = usage_caches.get(tool);
+            for profile in profiles {
+                let marker = if current.as_deref() == Some(profile.as_str()) {
+                    " *"
+                } else {
+                    ""
+                };
+                lines.push(format!("  {}{}", profile, marker));
+
+                if let Some(usage_lines) = cache.and_then(|c| c.get(profile)) {
+                    for line in usage_lines {
+                        lines.push(format!("    {}", line));
+                    }
+                } else {
+                    lines.push("    (no data)".to_string());
+                }
+            }
+        }
+
+        lines.push(String::new());
+    }
+
+    lines
+}
+
 fn cmd_save(tool_arg: Option<String>, profile_arg: Option<String>) -> Result<()> {
     let tool = match tool_arg {
         Some(t) => t.parse()?,
@@ -498,103 +515,66 @@ fn cmd_save(tool_arg: Option<String>, profile_arg: Option<String>) -> Result<()>
 }
 
 async fn cmd_usage() -> Result<()> {
-    let (claude_result, codex_result) = with_spinner("Fetching usage...", async {
-        tokio::join!(claude::usage::fetch_usage(), codex::usage::fetch_usage())
-    })
-    .await;
+    let term = Term::stderr();
+    term.hide_cursor()?;
+    let _guard = CursorGuard(&term);
 
-    let claude_label = build_tool_label(Tool::Claude);
-    let codex_label = build_tool_label(Tool::Codex);
+    term.write_line("Fetching usage...")?;
+    let mut rendered_lines: usize = 1;
 
-    render_claude_usage(&claude_label, claude_result);
-    render_codex_usage(&codex_label, codex_result);
+    let mut key_task = spawn_read_key_task();
 
-    Ok(())
-}
+    loop {
+        let tool_profiles: Vec<(Tool, Vec<String>, Option<String>)> = Tool::ALL
+            .iter()
+            .map(|&t| {
+                let profiles = t.list_profiles().unwrap_or_default();
+                let current = t.current_profile().ok().flatten();
+                (t, profiles, current)
+            })
+            .collect();
 
-fn build_tool_label(tool: Tool) -> String {
-    let current = tool.current_profile().ok().flatten();
-    match current {
-        Some(name) => format!("{} [{}]", tool, name),
-        None => format!("{}", tool),
-    }
-}
+        let codex_profiles: Vec<String> = tool_profiles
+            .iter()
+            .find(|(t, _, _)| *t == Tool::Codex)
+            .map(|(_, p, _)| p.clone())
+            .unwrap_or_default();
 
-fn render_claude_usage(
-    label: &str,
-    result: Result<(claude::usage::UsageResponse, claude::usage::ProfileInfo)>,
-) {
-    match result {
-        Ok((usage, info)) => {
-            let suffix = match info.plan_type.as_deref() {
-                Some(plan) => format!(" ({})", plan),
-                None => String::new(),
-            };
-            println!("{}{}", label, suffix);
-            println!(
-                "  {}",
-                format_usage_line(
-                    "5-hour",
-                    usage.five_hour.utilization,
-                    usage.five_hour.resets_at,
-                    &DisplayMode::Used,
-                )
-            );
-            println!(
-                "  {}",
-                format_usage_line(
-                    "Weekly",
-                    usage.seven_day.utilization,
-                    usage.seven_day.resets_at,
-                    &DisplayMode::Used,
-                )
-            );
+        let (claude_cache, codex_cache) =
+            tokio::join!(prefetch_claude_usage(), prefetch_codex_usage(&codex_profiles));
+
+        let mut usage_caches: HashMap<Tool, HashMap<String, Vec<String>>> = HashMap::new();
+        usage_caches.insert(Tool::Claude, claude_cache);
+        usage_caches.insert(Tool::Codex, codex_cache);
+
+        term.clear_last_lines(rendered_lines)?;
+
+        let lines = build_usage_monitor_lines(&tool_profiles, &usage_caches);
+        for line in &lines {
+            term.write_line(line)?;
         }
-        Err(e) => {
-            println!("{}", label);
-            println!("  Error: {}", e);
-        }
-    }
-    println!();
-}
+        rendered_lines = lines.len();
 
-fn render_codex_usage(label: &str, result: Result<Option<RateLimits>>) {
-    match result {
-        Ok(Some(limits)) => {
-            println!("{}", label);
-            if let Some(primary) = &limits.primary {
-                println!(
-                    "  {}",
-                    format_usage_line(
-                        "5-hour",
-                        primary.used_percent,
-                        Some(primary.resets_at_utc()),
-                        &DisplayMode::Left,
-                    )
-                );
-            }
-            if let Some(secondary) = &limits.secondary {
-                println!(
-                    "  {}",
-                    format_usage_line(
-                        "Weekly",
-                        secondary.used_percent,
-                        Some(secondary.resets_at_utc()),
-                        &DisplayMode::Left,
-                    )
-                );
+        loop {
+            tokio::select! {
+                key_result = &mut key_task => {
+                    let key = key_result
+                        .map_err(|e| anyhow!("failed to read key input: {}", e))??;
+                    match key {
+                        Key::Escape | Key::Char('q') => {
+                            term.clear_last_lines(rendered_lines)?;
+                            return Ok(());
+                        }
+                        _ => {}
+                    }
+                    key_task = spawn_read_key_task();
+                }
+                _ = tokio::time::sleep(USAGE_MONITOR_REFRESH_INTERVAL) => {
+                    break;
+                }
             }
         }
-        Ok(None) => {
-            println!("{}", label);
-            println!("  No usage data available");
-        }
-        Err(e) => {
-            println!("{}", label);
-            println!("  Error: {}", e);
-        }
     }
-    println!();
 }
 
 fn cmd_list() -> Result<()> {
@@ -784,6 +764,70 @@ mod tests {
             .await;
 
         assert!(actual.is_empty());
+    }
+
+    #[test]
+    fn build_usage_monitor_lines_shows_no_profiles_when_empty() {
+        let tool_profiles = vec![
+            (Tool::Claude, vec![], None),
+            (Tool::Codex, vec![], None),
+        ];
+        let usage_caches = HashMap::new();
+
+        let lines = build_usage_monitor_lines(&tool_profiles, &usage_caches);
+
+        let no_profiles_count = lines.iter().filter(|l| l.contains("(no profiles)")).count();
+        assert_eq!(no_profiles_count, 2);
+    }
+
+    #[test]
+    fn build_usage_monitor_lines_marks_current_profile_with_asterisk() {
+        let tool_profiles = vec![(
+            Tool::Claude,
+            vec!["personal".to_string(), "work".to_string()],
+            Some("personal".to_string()),
+        )];
+        let usage_caches = HashMap::new();
+
+        let lines = build_usage_monitor_lines(&tool_profiles, &usage_caches);
+
+        assert!(lines.iter().any(|l| l.contains("personal *")));
+        assert!(!lines.iter().any(|l| l.contains("work *")));
+    }
+
+    #[test]
+    fn build_usage_monitor_lines_shows_no_data_when_usage_missing() {
+        let tool_profiles = vec![(
+            Tool::Claude,
+            vec!["personal".to_string()],
+            Some("personal".to_string()),
+        )];
+        let usage_caches = HashMap::new();
+
+        let lines = build_usage_monitor_lines(&tool_profiles, &usage_caches);
+
+        assert!(lines.iter().any(|l| l.contains("(no data)")));
+    }
+
+    #[test]
+    fn build_usage_monitor_lines_displays_usage_data() {
+        let tool_profiles = vec![(
+            Tool::Claude,
+            vec!["personal".to_string()],
+            Some("personal".to_string()),
+        )];
+        let mut claude_cache = HashMap::new();
+        claude_cache.insert(
+            "personal".to_string(),
+            vec!["5-hour  60.0% used".to_string()],
+        );
+        let mut usage_caches = HashMap::new();
+        usage_caches.insert(Tool::Claude, claude_cache);
+
+        let lines = build_usage_monitor_lines(&tool_profiles, &usage_caches);
+
+        assert!(lines.iter().any(|l| l.contains("60.0% used")));
+        assert!(!lines.iter().any(|l| l.contains("(no data)")));
     }
 
     #[tokio::test]

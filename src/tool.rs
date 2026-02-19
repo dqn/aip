@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 use anyhow::{Result, anyhow};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Tool {
     Claude,
     Codex,

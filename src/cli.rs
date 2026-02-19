@@ -37,7 +37,7 @@ pub enum Command {
         /// Profile name
         profile: Option<String>,
     },
-    /// Show usage for all tools
+    /// Monitor usage for all profiles (auto-refreshes every 5 seconds)
     Usage,
     /// List all profiles
     List,
