@@ -37,12 +37,6 @@ pub enum Command {
         /// Profile name
         profile: Option<String>,
     },
-    /// Monitor usage for all profiles (auto-refreshes every 5 seconds)
-    Usage,
-    /// List all profiles
-    List,
-    /// Show current profile for each tool
-    Current,
     /// Delete a profile
     Delete {
         /// Tool name (claude or codex)
