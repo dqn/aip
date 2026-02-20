@@ -508,6 +508,7 @@ async fn cmd_dashboard() -> Result<()> {
                         }
                         DashboardAction::Reload => {
                             needs_reload = true;
+                            key_task = spawn_read_key_task();
                             break;
                         }
                         DashboardAction::Render => {
@@ -561,6 +562,7 @@ async fn cmd_dashboard() -> Result<()> {
                         }
                         DashboardAction::Reload => {
                             needs_reload = true;
+                            key_task = spawn_read_key_task();
                             break;
                         }
                         DashboardAction::Render => {
