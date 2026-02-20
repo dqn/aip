@@ -7,7 +7,7 @@ mod tool;
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
-use anyhow::{Result, anyhow};
+use anyhow::Result;
 use chrono::Local;
 use clap::Parser;
 use console::{Key, Term};
@@ -60,8 +60,18 @@ impl Drop for CursorGuard<'_> {
     }
 }
 
-fn spawn_read_key_task() -> tokio::task::JoinHandle<std::io::Result<Key>> {
-    tokio::task::spawn_blocking(|| Term::stderr().read_key())
+fn spawn_key_reader() -> tokio::sync::mpsc::UnboundedReceiver<std::io::Result<Key>> {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    tokio::task::spawn_blocking(move || {
+        let term = Term::stderr();
+        loop {
+            let key = term.read_key();
+            if tx.send(key).is_err() {
+                break;
+            }
+        }
+    });
+    rx
 }
 
 fn capitalize_first(s: &str) -> String {
@@ -417,7 +427,7 @@ async fn cmd_dashboard() -> Result<()> {
 
     let mut rendered_lines: usize = 0;
     let mut usage_caches: HashMap<Tool, UsageCache> = HashMap::new();
-    let mut key_task = spawn_read_key_task();
+    let mut key_rx = spawn_key_reader();
     let mut selected: usize = 0;
     let mut mode = DashboardMode::Normal;
 
@@ -492,9 +502,8 @@ async fn cmd_dashboard() -> Result<()> {
                         &view!(&tool_profiles, &usage_caches, &pending_tools, &selectable_items, selected, &mode),
                     )?;
                 }
-                key_result = &mut key_task => {
-                    let key = key_result
-                        .map_err(|e| anyhow!("failed to read key input: {}", e))??;
+                Some(key_result) = key_rx.recv() => {
+                    let key = key_result?;
                     match handle_dashboard_key(
                         key,
                         &mut selected,
@@ -508,7 +517,6 @@ async fn cmd_dashboard() -> Result<()> {
                         }
                         DashboardAction::Reload => {
                             needs_reload = true;
-                            key_task = spawn_read_key_task();
                             break;
                         }
                         DashboardAction::Render => {
@@ -520,7 +528,6 @@ async fn cmd_dashboard() -> Result<()> {
                         }
                         DashboardAction::None => {}
                     }
-                    key_task = spawn_read_key_task();
                 }
             }
         }
@@ -546,9 +553,8 @@ async fn cmd_dashboard() -> Result<()> {
         // Phase 3: Wait for refresh interval or user interaction
         loop {
             tokio::select! {
-                key_result = &mut key_task => {
-                    let key = key_result
-                        .map_err(|e| anyhow!("failed to read key input: {}", e))??;
+                Some(key_result) = key_rx.recv() => {
+                    let key = key_result?;
                     match handle_dashboard_key(
                         key,
                         &mut selected,
@@ -562,7 +568,6 @@ async fn cmd_dashboard() -> Result<()> {
                         }
                         DashboardAction::Reload => {
                             needs_reload = true;
-                            key_task = spawn_read_key_task();
                             break;
                         }
                         DashboardAction::Render => {
@@ -574,7 +579,6 @@ async fn cmd_dashboard() -> Result<()> {
                         }
                         DashboardAction::None => {}
                     }
-                    key_task = spawn_read_key_task();
                 }
                 _ = tokio::time::sleep(USAGE_REFRESH_INTERVAL) => {
                     break;
