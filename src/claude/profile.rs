@@ -71,7 +71,7 @@ fn sync_keychain_to_current_profile() {
             k_org, current, s_org,
         );
         eprintln!("Skipping sync to protect stored credentials.");
-        eprintln!("Run 'aip login' to re-authenticate and save to the correct profile.");
+        eprintln!("Re-authenticate and run 'aip save' to save to the correct profile.");
         return;
     }
 
@@ -89,16 +89,6 @@ pub fn save(name: &str) -> Result<()> {
     }
 
     // Read current credentials from keychain
-    let creds = keychain::read()?;
-    let json = serde_json::to_string_pretty(&creds)?;
-
-    fs::create_dir_all(&dest_dir)?;
-    fs::write(dest_dir.join("credentials.json"), json)?;
-    Ok(())
-}
-
-pub fn update(name: &str) -> Result<()> {
-    let dest_dir = TOOL.profile_dir(name)?;
     let creds = keychain::read()?;
     let json = serde_json::to_string_pretty(&creds)?;
 

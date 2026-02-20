@@ -5,15 +5,13 @@ mod display;
 mod tool;
 
 use std::collections::{HashMap, HashSet};
-use std::fs;
-use std::process::Command as ProcessCommand;
 use std::time::Duration;
 
 use anyhow::{Result, anyhow};
 use chrono::Local;
 use clap::Parser;
 use console::{Key, Term};
-use dialoguer::{Confirm, Input, Select};
+use dialoguer::{Input, Select};
 
 use cli::{Cli, Command};
 use codex::usage::RateLimits;
@@ -27,12 +25,6 @@ async fn main() -> Result<()> {
     match cli.command {
         None => cmd_dashboard().await?,
         Some(Command::Save { tool, profile }) => cmd_save(tool, profile)?,
-        Some(Command::Delete { tool, profile }) => cmd_delete(tool, profile)?,
-        Some(Command::Switch { tool, profile }) => {
-            let tool: Tool = tool.parse()?;
-            cmd_switch(tool, &profile)?;
-        }
-        Some(Command::Login { tool, profile }) => cmd_login(tool, profile)?,
     }
 
     Ok(())
@@ -89,33 +81,6 @@ fn select_tool() -> Result<Option<Tool>> {
         .interact_opt()?;
 
     Ok(selection.map(|i| Tool::ALL[i]))
-}
-
-fn select_profile(tool: Tool) -> Result<String> {
-    let profiles = tool.list_profiles()?;
-    if profiles.is_empty() {
-        anyhow::bail!("no profiles found for {}", tool);
-    }
-
-    let current = tool.current_profile()?;
-    let display_items: Vec<String> = profiles
-        .iter()
-        .map(|p| {
-            if current.as_deref() == Some(p.as_str()) {
-                format!("{} (current)", p)
-            } else {
-                p.clone()
-            }
-        })
-        .collect();
-
-    let selection = Select::new()
-        .with_prompt("Select profile")
-        .items(&display_items)
-        .default(0)
-        .interact()?;
-
-    Ok(profiles[selection].clone())
 }
 
 // --- Usage fetching ---
@@ -653,98 +618,6 @@ fn cmd_save(tool_arg: Option<String>, profile_arg: Option<String>) -> Result<()>
     }
 
     println!("Saved profile '{}' for {}", name, tool);
-    Ok(())
-}
-
-fn cmd_delete(tool_arg: Option<String>, profile_arg: Option<String>) -> Result<()> {
-    let tool: Tool = match tool_arg {
-        Some(t) => t.parse()?,
-        None => {
-            let Some(t) = select_tool()? else {
-                return Ok(());
-            };
-            t
-        }
-    };
-
-    let profile = match profile_arg {
-        Some(p) => p,
-        None => select_profile(tool)?,
-    };
-
-    if !Confirm::new()
-        .with_prompt(format!("Delete profile '{}' for {}?", profile, tool))
-        .default(false)
-        .interact()?
-    {
-        println!("Cancelled");
-        return Ok(());
-    }
-
-    match tool {
-        Tool::Claude => claude::profile::delete(&profile)?,
-        Tool::Codex => codex::profile::delete(&profile)?,
-    }
-
-    println!("Deleted profile '{}' for {}", profile, tool);
-    Ok(())
-}
-
-fn select_or_create_profile(tool: Tool) -> Result<String> {
-    let mut profiles = tool.list_profiles()?;
-    let create_label = "[Create new profile]";
-    let mut items: Vec<&str> = profiles.iter().map(|s| s.as_str()).collect();
-    items.push(create_label);
-
-    let selection = Select::new()
-        .with_prompt("Select profile to save credentials")
-        .items(&items)
-        .default(0)
-        .interact()?;
-
-    if selection == profiles.len() {
-        let name: String = Input::new().with_prompt("Profile name").interact_text()?;
-        profiles.push(name.clone());
-        Ok(name)
-    } else {
-        Ok(profiles[selection].clone())
-    }
-}
-
-fn cmd_login(tool_arg: Option<String>, profile_arg: Option<String>) -> Result<()> {
-    let tool: Tool = match tool_arg {
-        Some(t) => t.parse()?,
-        None => {
-            let Some(t) = select_tool()? else {
-                return Ok(());
-            };
-            t
-        }
-    };
-
-    let profile = match profile_arg {
-        Some(p) => p,
-        None => select_or_create_profile(tool)?,
-    };
-
-    let status = match tool {
-        Tool::Claude => ProcessCommand::new("claude")
-            .args(["auth", "login"])
-            .status()?,
-        Tool::Codex => ProcessCommand::new("codex").arg("login").status()?,
-    };
-    if !status.success() {
-        return Err(anyhow!("login command failed"));
-    }
-
-    match tool {
-        Tool::Claude => claude::profile::update(&profile)?,
-        Tool::Codex => codex::profile::update(&profile)?,
-    }
-
-    fs::write(tool.current_file()?, format!("{}\n", profile))?;
-
-    println!("Saved credentials to profile '{}' for {}", profile, tool);
     Ok(())
 }
 

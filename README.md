@@ -6,17 +6,13 @@ AI Profile Manager for Claude Code and Codex CLI.
 
 - Manage multiple profiles for Claude Code and Codex CLI.
 - Save current credentials into a named profile.
-- Switch profiles interactively (`aip`) or non-interactively (`aip switch`).
-- Show profile lists and current active profile.
-- Run login flows and store credentials into a selected profile.
-- Fetch and display usage windows for both tools.
+- Switch profiles and delete profiles interactively from the dashboard.
+- Fetch and display usage windows for both tools with auto-refresh.
 
 ## Requirements
 
 - macOS (Claude profile handling uses Keychain via the `security` command).
 - Rust toolchain that supports edition 2024.
-- `claude` CLI in `PATH` for `aip login` (Claude).
-- `codex` CLI in `PATH` for `aip login` (Codex).
 
 ## Installation
 
@@ -33,16 +29,10 @@ cargo run -- <command>
 ## Commands
 
 ```bash
-aip login [tool] [name] # run tool login and save to selected/new profile
-aip save [tool] [name]  # save current credentials to a profile
-aip list                # list all profiles
-aip current             # show current profile per tool
-aip                     # interactive mode (select tool + profile)
-aip switch <tool> <name> # switch profile without prompts
-aip usage               # show usage for current Claude and Codex profiles
-aip delete [tool] [name] # delete a profile
-aip -h, aip --help      # show command help
-aip -v, aip --version   # show aip version
+aip                    # interactive dashboard (switch, delete, usage monitor)
+aip save [tool] [name] # save current credentials to a profile
+aip -h, aip --help     # show command help
+aip -v, aip --version  # show aip version
 ```
 
 `tool` values: `claude` or `codex`
@@ -65,7 +55,7 @@ aip -v, aip --version   # show aip version
 
 ## Notes
 
-- `aip` (without subcommands) starts interactive profile switching with usage preview.
+- `aip` (without subcommands) starts the interactive dashboard with profile switching, deletion, and live usage monitor.
 - Switching profiles performs a safety sync check to avoid overwriting mismatched credentials.
 - Usage display semantics differ by tool.
 - Claude shows percentage as **used**.
