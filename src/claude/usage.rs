@@ -126,8 +126,12 @@ async fn get_access_token() -> Result<(String, ProfileInfo)> {
     let token_resp = refresh_token(&oauth).await?;
     let access_token = token_resp.access_token.clone();
     apply_token_response(&mut raw, &token_resp)?;
-    keychain::write(&raw)
-        .map_err(|e| anyhow!("token refreshed but keychain write failed (re-authenticate): {}", e))?;
+    keychain::write(&raw).map_err(|e| {
+        anyhow!(
+            "token refreshed but keychain write failed (re-authenticate): {}",
+            e
+        )
+    })?;
 
     Ok((access_token, info))
 }
