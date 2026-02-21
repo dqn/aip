@@ -15,23 +15,50 @@ pub fn switch(profile: &str) -> Result<()> {
         return Err(anyhow!("profile '{}' does not exist for {}", profile, TOOL));
     }
 
-    // Atomic write for _current
+    // Save active credentials.json to current profile
+    sync_credentials_to_current_profile();
+
+    // Load new profile's credentials.json to root
+    let src = profile_dir.join("credentials.json");
+    if src.exists() {
+        let dest = TOOL.home_dir()?.join("credentials.json");
+        fs_util::atomic_copy(&src, &dest)?;
+    }
+
+    // Update _current file
     let current_file = TOOL.current_file()?;
     fs_util::atomic_write(&current_file, &format!("{}\n", profile))?;
     Ok(())
 }
 
-pub fn save(name: &str) -> Result<()> {
-    let current = TOOL
-        .current_profile()?
-        .ok_or_else(|| anyhow!("no current profile set for {}", TOOL))?;
-
-    let src = TOOL.profile_dir(&current)?.join("credentials.json");
+fn sync_credentials_to_current_profile() {
+    let current = match TOOL.current_profile() {
+        Ok(Some(name)) => name,
+        _ => return,
+    };
+    let dest = match TOOL.profile_dir(&current) {
+        Ok(dir) => dir.join("credentials.json"),
+        _ => return,
+    };
+    let src = match TOOL.home_dir() {
+        Ok(dir) => dir.join("credentials.json"),
+        _ => return,
+    };
     if !src.exists() {
-        return Err(anyhow!(
-            "credentials.json not found in current profile '{}'",
-            current
-        ));
+        return;
+    }
+    if let Err(e) = fs_util::atomic_copy(&src, &dest) {
+        eprintln!(
+            "Warning: failed to sync credentials to profile '{}': {}",
+            current, e
+        );
+    }
+}
+
+pub fn save(name: &str) -> Result<()> {
+    let src = TOOL.home_dir()?.join("credentials.json");
+    if !src.exists() {
+        return Err(anyhow!("credentials.json not found in {}", TOOL));
     }
 
     let dest_dir = TOOL.profile_dir(name)?;
