@@ -6,7 +6,6 @@ use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use serde_json::Value;
 
-use super::keychain;
 use crate::fs_util;
 use crate::http::shared_client;
 use crate::tool::Tool;
@@ -109,38 +108,6 @@ fn apply_token_response(raw: &mut Value, token_resp: &TokenResponse) -> Result<(
     Ok(())
 }
 
-async fn get_access_token() -> Result<(String, ProfileInfo)> {
-    let mut raw = keychain::read()?;
-    let oauth = read_oauth(&raw)?;
-
-    let info = ProfileInfo {
-        plan_type: oauth.plan_type.clone(),
-    };
-
-    if !is_token_expired(&oauth) {
-        return Ok((oauth.access_token, info));
-    }
-
-    // Token expired, refresh it
-    let token_resp = refresh_token(&oauth).await?;
-    let access_token = token_resp.access_token.clone();
-    apply_token_response(&mut raw, &token_resp)?;
-    keychain::write(&raw).map_err(|e| {
-        anyhow!(
-            "token refreshed but keychain write failed (re-authenticate): {}",
-            e
-        )
-    })?;
-
-    Ok((access_token, info))
-}
-
-pub async fn fetch_usage() -> Result<(UsageResponse, ProfileInfo)> {
-    let (token, info) = get_access_token().await?;
-    let usage = fetch_usage_with_token(&token).await?;
-    Ok((usage, info))
-}
-
 pub async fn fetch_usage_with_token(token: &str) -> Result<UsageResponse> {
     if token.is_empty() {
         return Err(anyhow!("access token is empty"));
@@ -193,25 +160,19 @@ pub async fn fetch_all_profiles_usage() -> HashMap<String, Result<(UsageResponse
         Ok(p) => p,
         Err(_) => return HashMap::new(),
     };
-    let current = Tool::Claude.current_profile().ok().flatten();
 
     let mut handles = Vec::new();
 
     for profile in profiles {
-        let is_current = current.as_deref() == Some(profile.as_str());
         handles.push(tokio::spawn(async move {
-            let result = if is_current {
-                fetch_usage().await
-            } else {
-                async {
-                    let dir = Tool::Claude.profile_dir(&profile)?;
-                    let creds_path = dir.join("credentials.json");
-                    let (token, info) = get_access_token_from_credentials(&creds_path).await?;
-                    let usage = fetch_usage_with_token(&token).await?;
-                    Ok((usage, info))
-                }
-                .await
-            };
+            let result = async {
+                let dir = Tool::Claude.profile_dir(&profile)?;
+                let creds_path = dir.join("credentials.json");
+                let (token, info) = get_access_token_from_credentials(&creds_path).await?;
+                let usage = fetch_usage_with_token(&token).await?;
+                Ok((usage, info))
+            }
+            .await;
             (profile, result)
         }));
     }
