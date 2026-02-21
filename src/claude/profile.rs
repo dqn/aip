@@ -47,5 +47,10 @@ pub fn save(name: &str) -> Result<()> {
     }
     #[cfg(unix)]
     fs::set_permissions(&creds_path, fs::Permissions::from_mode(0o600))?;
+
+    // Update current profile to the newly saved one
+    let current_file = TOOL.current_file()?;
+    fs_util::atomic_write(&current_file, &format!("{}\n", name))?;
+
     Ok(())
 }
