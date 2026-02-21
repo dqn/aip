@@ -42,6 +42,14 @@ impl Tool {
     }
 
     pub fn profile_dir(&self, name: &str) -> Result<PathBuf> {
+        if name.contains('/')
+            || name.contains('\\')
+            || name == ".."
+            || name == "."
+            || name.is_empty()
+        {
+            return Err(anyhow!("invalid profile name: '{}'", name));
+        }
         Ok(self.profiles_dir()?.join(name))
     }
 
@@ -87,5 +95,27 @@ impl std::str::FromStr for Tool {
                 s
             )),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn profile_dir_rejects_path_traversal() {
+        assert!(Tool::Claude.profile_dir("../evil").is_err());
+        assert!(Tool::Claude.profile_dir("foo/bar").is_err());
+        assert!(Tool::Claude.profile_dir("foo\\bar").is_err());
+        assert!(Tool::Claude.profile_dir("..").is_err());
+        assert!(Tool::Claude.profile_dir(".").is_err());
+        assert!(Tool::Claude.profile_dir("").is_err());
+    }
+
+    #[test]
+    fn profile_dir_accepts_valid_names() {
+        assert!(Tool::Claude.profile_dir("personal").is_ok());
+        assert!(Tool::Claude.profile_dir("work-account").is_ok());
+        assert!(Tool::Claude.profile_dir("test_123").is_ok());
     }
 }

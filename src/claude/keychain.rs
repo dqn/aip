@@ -1,4 +1,5 @@
-use std::process::Command;
+use std::io::Write;
+use std::process::{Command, Stdio};
 
 use anyhow::{Result, anyhow};
 use serde_json::Value;
@@ -6,8 +7,9 @@ use serde_json::Value;
 const SERVICE: &str = "Claude Code-credentials";
 
 fn account() -> Result<String> {
-    let output = Command::new("whoami").output()?;
-    Ok(String::from_utf8(output.stdout)?.trim().to_string())
+    std::env::var("USER")
+        .or_else(|_| std::env::var("LOGNAME"))
+        .map_err(|_| anyhow!("could not determine current user"))
 }
 
 pub fn read() -> Result<Value> {
@@ -33,17 +35,20 @@ pub fn write(value: &Value) -> Result<()> {
         .args(["delete-generic-password", "-s", SERVICE, "-a", &acct])
         .output();
 
-    let output = Command::new("security")
-        .args([
-            "add-generic-password",
-            "-s",
-            SERVICE,
-            "-a",
-            &acct,
-            "-w",
-            &json_str,
-        ])
-        .output()?;
+    // Pass password via stdin to avoid exposure in process list
+    let mut child = Command::new("security")
+        .args(["add-generic-password", "-s", SERVICE, "-a", &acct, "-w"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(json_str.as_bytes())?;
+        stdin.write_all(b"\n")?;
+    }
+
+    let output = child.wait_with_output()?;
 
     if !output.status.success() {
         return Err(anyhow!(
