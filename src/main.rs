@@ -284,7 +284,12 @@ fn build_dashboard_lines(
                     .and_then(|entry| entry.plan_type.as_deref())
                     .map(|pt| format!(" ({})", capitalize_first(pt)))
                     .unwrap_or_default();
-                lines.push(format!("{} {}{}{}", cursor, profile, marker, plan_suffix));
+                let line = format!("{} {}{}{}", cursor, profile, marker, plan_suffix);
+                if is_selected {
+                    lines.push(format!("\x1b[1;36m{}\x1b[0m", line));
+                } else {
+                    lines.push(line);
+                }
 
                 if let Some(entry) = cache.and_then(|c| c.get(profile)) {
                     for line in &entry.lines {
@@ -698,7 +703,7 @@ mod tests {
         );
 
         assert!(lines.iter().any(|l| l.starts_with("  personal")));
-        assert!(lines.iter().any(|l| l.starts_with("> work")));
+        assert!(lines.iter().any(|l| l.contains("> work")));
     }
 
     #[test]
