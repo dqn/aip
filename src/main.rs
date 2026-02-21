@@ -14,16 +14,23 @@ use dialoguer::{Input, Select};
 use cli::{Cli, Command};
 use tool::Tool;
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    let cli = Cli::parse_from(cli::normalize_short_flags(std::env::args_os()));
+fn main() -> Result<()> {
+    let rt = tokio::runtime::Runtime::new()?;
+    let result = rt.block_on(async {
+        let cli = Cli::parse_from(cli::normalize_short_flags(std::env::args_os()));
 
-    match cli.command {
-        None => dashboard::cmd_dashboard().await?,
-        Some(Command::Save { tool, profile }) => cmd_save(tool, profile)?,
-    }
+        match cli.command {
+            None => dashboard::cmd_dashboard().await?,
+            Some(Command::Save { tool, profile }) => cmd_save(tool, profile)?,
+        }
 
-    Ok(())
+        Ok(())
+    });
+
+    // Don't wait for the blocking key-reader thread to finish.
+    rt.shutdown_background();
+
+    result
 }
 
 fn select_tool() -> Result<Option<Tool>> {
