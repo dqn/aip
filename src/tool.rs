@@ -55,6 +55,9 @@ impl Tool {
                 name
             ));
         }
+        if name == "_current" {
+            return Err(anyhow!("'_current' is a reserved name"));
+        }
         Ok(self.profiles_dir()?.join(name))
     }
 
@@ -66,7 +69,10 @@ impl Tool {
         let mut profiles = Vec::new();
         for entry in std::fs::read_dir(&profiles_dir)? {
             let entry = entry?;
-            let name = entry.file_name().to_string_lossy().to_string();
+            let name = match entry.file_name().into_string() {
+                Ok(n) => n,
+                Err(_) => continue,
+            };
             if name == "_current" {
                 continue;
             }
@@ -118,6 +124,12 @@ mod tests {
         assert!(Tool::Claude.profile_dir("foo\0bar").is_err());
         assert!(Tool::Claude.profile_dir(" leading").is_err());
         assert!(Tool::Claude.profile_dir("trailing ").is_err());
+    }
+
+    #[test]
+    fn profile_dir_rejects_reserved_current_name() {
+        assert!(Tool::Claude.profile_dir("_current").is_err());
+        assert!(Tool::Codex.profile_dir("_current").is_err());
     }
 
     #[test]

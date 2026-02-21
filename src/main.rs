@@ -453,8 +453,8 @@ fn handle_dashboard_key(
 async fn cmd_dashboard() -> Result<()> {
     let term = Term::stderr();
     term.write_str("\x1b[?1049h")?;
-    term.hide_cursor()?;
     let _guard = ScreenGuard(&term);
+    term.hide_cursor()?;
 
     let mut usage_caches: HashMap<Tool, UsageCache> = HashMap::new();
     let mut key_rx = spawn_key_reader();

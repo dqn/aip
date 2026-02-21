@@ -1,4 +1,6 @@
 use std::fs;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 
 use anyhow::{Result, anyhow};
 
@@ -104,10 +106,13 @@ pub fn save(name: &str) -> Result<()> {
     let json = serde_json::to_string_pretty(&creds)?;
 
     fs::create_dir_all(&dest_dir)?;
-    if let Err(e) = fs::write(dest_dir.join("credentials.json"), json) {
+    let creds_path = dest_dir.join("credentials.json");
+    if let Err(e) = fs::write(&creds_path, json) {
         let _ = fs::remove_dir_all(&dest_dir);
         return Err(e.into());
     }
+    #[cfg(unix)]
+    fs::set_permissions(&creds_path, fs::Permissions::from_mode(0o600))?;
     Ok(())
 }
 

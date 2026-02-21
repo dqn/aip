@@ -126,14 +126,20 @@ async fn get_access_token() -> Result<(String, ProfileInfo)> {
     let token_resp = refresh_token(&oauth).await?;
     let access_token = token_resp.access_token.clone();
     apply_token_response(&mut raw, &token_resp)?;
-    keychain::write(&raw)?;
+    keychain::write(&raw)
+        .map_err(|e| anyhow!("token refreshed but keychain write failed (re-authenticate): {}", e))?;
 
     Ok((access_token, info))
 }
 
 fn shared_client() -> &'static reqwest::Client {
     static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
-    CLIENT.get_or_init(reqwest::Client::new)
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(15))
+            .build()
+            .expect("failed to build HTTP client")
+    })
 }
 
 pub async fn fetch_usage() -> Result<(UsageResponse, ProfileInfo)> {

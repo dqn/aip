@@ -9,6 +9,7 @@ use crate::tool::Tool;
 
 // These constants are reverse-engineered from the Codex CLI binary.
 // They may need updating when the upstream tool changes.
+// Last verified: 2026-02-21
 const USAGE_URL: &str = "https://chatgpt.com/backend-api/wham/usage";
 const TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
 const CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
@@ -69,7 +70,12 @@ fn read_auth(path: &Path) -> Result<(Value, TokenData)> {
 
 fn shared_client() -> &'static reqwest::Client {
     static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
-    CLIENT.get_or_init(reqwest::Client::new)
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(15))
+            .build()
+            .expect("failed to build HTTP client")
+    })
 }
 
 async fn do_refresh_token(refresh_token: &str) -> Result<RefreshResponse> {

@@ -1,4 +1,6 @@
 use std::fs;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 
 use anyhow::{Result, anyhow};
 
@@ -86,7 +88,9 @@ fn sync_auth_to_current_profile() {
         return;
     }
 
-    if let Err(e) = fs::copy(&src, &dest) {
+    let tmp = dest.with_extension("tmp");
+    if let Err(e) = fs::copy(&src, &tmp).and_then(|_| fs::rename(&tmp, &dest)) {
+        let _ = fs::remove_file(&tmp);
         eprintln!(
             "Warning: failed to sync auth to profile '{}': {}",
             current, e
@@ -106,10 +110,13 @@ pub fn save(name: &str) -> Result<()> {
     }
 
     fs::create_dir_all(&dest_dir)?;
-    if let Err(e) = fs::copy(&src, dest_dir.join("auth.json")) {
+    let dest_path = dest_dir.join("auth.json");
+    if let Err(e) = fs::copy(&src, &dest_path) {
         let _ = fs::remove_dir_all(&dest_dir);
         return Err(e.into());
     }
+    #[cfg(unix)]
+    fs::set_permissions(&dest_path, fs::Permissions::from_mode(0o600))?;
     Ok(())
 }
 
