@@ -141,6 +141,10 @@ pub async fn fetch_usage() -> Result<(UsageResponse, ProfileInfo)> {
 }
 
 pub async fn fetch_usage_with_token(token: &str) -> Result<UsageResponse> {
+    if token.is_empty() {
+        return Err(anyhow!("access token is empty"));
+    }
+
     let resp = shared_client()
         .get("https://api.anthropic.com/api/oauth/usage")
         .header("Authorization", format!("Bearer {}", token))
@@ -178,7 +182,9 @@ async fn get_access_token_from_credentials(path: &Path) -> Result<(String, Profi
         .map_err(|_| anyhow!("Refresh token expired (switch to this profile to re-auth)"))?;
     let access_token = token_resp.access_token.clone();
     apply_token_response(&mut raw, &token_resp);
-    std::fs::write(path, serde_json::to_string_pretty(&raw)?)?;
+    let tmp = path.with_extension("tmp");
+    std::fs::write(&tmp, serde_json::to_string_pretty(&raw)?)?;
+    std::fs::rename(&tmp, path)?;
 
     Ok((access_token, info))
 }

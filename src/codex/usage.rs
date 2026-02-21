@@ -144,9 +144,16 @@ async fn fetch_from_auth_path(path: &Path) -> Result<Option<RateLimits>> {
     // Token expired, try refreshing
     let refresh_resp = do_refresh_token(&tokens.refresh_token).await?;
     apply_refresh(&mut raw, &refresh_resp);
-    std::fs::write(path, serde_json::to_string_pretty(&raw)?)?;
 
     let new_tokens = read_tokens(&raw)?;
+    if new_tokens.access_token == tokens.access_token {
+        return Err(anyhow!("token refresh returned no new access token"));
+    }
+
+    let tmp = path.with_extension("tmp");
+    std::fs::write(&tmp, serde_json::to_string_pretty(&raw)?)?;
+    std::fs::rename(&tmp, path)?;
+
     let resp = fetch_usage_api(&new_tokens).await?;
     parse_usage_response(resp).await
 }

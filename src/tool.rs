@@ -42,11 +42,13 @@ impl Tool {
     }
 
     pub fn profile_dir(&self, name: &str) -> Result<PathBuf> {
-        if name.contains('/')
+        if name.is_empty()
+            || name.contains('/')
             || name.contains('\\')
+            || name.contains('\0')
             || name == ".."
             || name == "."
-            || name.is_empty()
+            || name.trim() != name
         {
             return Err(anyhow!("invalid profile name: '{}'", name));
         }
@@ -110,6 +112,9 @@ mod tests {
         assert!(Tool::Claude.profile_dir("..").is_err());
         assert!(Tool::Claude.profile_dir(".").is_err());
         assert!(Tool::Claude.profile_dir("").is_err());
+        assert!(Tool::Claude.profile_dir("foo\0bar").is_err());
+        assert!(Tool::Claude.profile_dir(" leading").is_err());
+        assert!(Tool::Claude.profile_dir("trailing ").is_err());
     }
 
     #[test]
