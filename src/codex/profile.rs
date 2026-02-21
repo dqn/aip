@@ -41,43 +41,45 @@ fn sync_auth_to_current_profile() {
         Ok(dir) => dir.join("auth.json"),
         _ => return,
     };
-    if src.exists() && dest.exists() {
-        let src_value: Option<serde_json::Value> = fs::read_to_string(&src)
-            .ok()
-            .and_then(|s| serde_json::from_str(&s).ok());
-        let dest_value: Option<serde_json::Value> = fs::read_to_string(&dest)
-            .ok()
-            .and_then(|s| serde_json::from_str(&s).ok());
+    if !src.exists() {
+        return;
+    }
 
-        let src_account = src_value
-            .as_ref()
-            .and_then(|v| v.get("tokens"))
-            .and_then(|t| t.get("account_id"))
-            .and_then(|a| a.as_str());
-        let dest_account = dest_value
-            .as_ref()
-            .and_then(|v| v.get("tokens"))
-            .and_then(|t| t.get("account_id"))
-            .and_then(|a| a.as_str());
+    let src_value: Option<serde_json::Value> = fs::read_to_string(&src)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok());
+    let dest_value: Option<serde_json::Value> = fs::read_to_string(&dest)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok());
 
-        if let (Some(src_id), Some(dest_id)) = (src_account, dest_account)
-            && src_id != dest_id
-        {
-            eprintln!(
-                "Warning: Current auth.json (account: '{}') differs from profile '{}' (account: '{}').",
-                src_id, current, dest_id,
-            );
-            eprintln!("Skipping sync to protect stored credentials.");
-            eprintln!("Re-authenticate and run 'aip save' to save to the correct profile.");
-            return;
-        }
+    let src_account = src_value
+        .as_ref()
+        .and_then(|v| v.get("tokens"))
+        .and_then(|t| t.get("account_id"))
+        .and_then(|a| a.as_str());
+    let dest_account = dest_value
+        .as_ref()
+        .and_then(|v| v.get("tokens"))
+        .and_then(|t| t.get("account_id"))
+        .and_then(|a| a.as_str());
 
-        if let Err(e) = fs::copy(&src, &dest) {
-            eprintln!(
-                "Warning: failed to sync auth to profile '{}': {}",
-                current, e
-            );
-        }
+    if let (Some(src_id), Some(dest_id)) = (src_account, dest_account)
+        && src_id != dest_id
+    {
+        eprintln!(
+            "Warning: Current auth.json (account: '{}') differs from profile '{}' (account: '{}').",
+            src_id, current, dest_id,
+        );
+        eprintln!("Skipping sync to protect stored credentials.");
+        eprintln!("Re-authenticate and run 'aip save' to save to the correct profile.");
+        return;
+    }
+
+    if let Err(e) = fs::copy(&src, &dest) {
+        eprintln!(
+            "Warning: failed to sync auth to profile '{}': {}",
+            current, e
+        );
     }
 }
 
@@ -93,7 +95,10 @@ pub fn save(name: &str) -> Result<()> {
     }
 
     fs::create_dir_all(&dest_dir)?;
-    fs::copy(&src, dest_dir.join("auth.json"))?;
+    if let Err(e) = fs::copy(&src, dest_dir.join("auth.json")) {
+        let _ = fs::remove_dir_all(&dest_dir);
+        return Err(e.into());
+    }
     Ok(())
 }
 

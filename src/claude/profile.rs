@@ -37,9 +37,6 @@ fn sync_keychain_to_current_profile() {
         Ok(dir) => dir.join("credentials.json"),
         _ => return,
     };
-    if !creds_path.exists() {
-        return;
-    }
     let keychain_value = match keychain::read() {
         Ok(v) => v,
         _ => return,
@@ -79,7 +76,9 @@ fn sync_keychain_to_current_profile() {
         Ok(j) => j,
         _ => return,
     };
-    if let Err(e) = fs::write(&creds_path, json) {
+    let tmp = creds_path.with_extension("tmp");
+    if let Err(e) = fs::write(&tmp, &json).and_then(|_| fs::rename(&tmp, &creds_path)) {
+        let _ = fs::remove_file(&tmp);
         eprintln!(
             "Warning: failed to sync credentials to profile '{}': {}",
             current, e
@@ -98,7 +97,10 @@ pub fn save(name: &str) -> Result<()> {
     let json = serde_json::to_string_pretty(&creds)?;
 
     fs::create_dir_all(&dest_dir)?;
-    fs::write(dest_dir.join("credentials.json"), json)?;
+    if let Err(e) = fs::write(dest_dir.join("credentials.json"), json) {
+        let _ = fs::remove_dir_all(&dest_dir);
+        return Err(e.into());
+    }
     Ok(())
 }
 

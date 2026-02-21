@@ -12,7 +12,7 @@ pub struct Cli {
     pub command: Option<Command>,
 }
 
-pub fn normalize_short_version_flag<I, T>(args: I) -> Vec<OsString>
+pub fn normalize_short_flags<I, T>(args: I) -> Vec<OsString>
 where
     I: IntoIterator<Item = T>,
     T: Into<OsString>,
@@ -56,7 +56,7 @@ mod tests {
 
     #[test]
     fn version_short_option_displays_version() {
-        let parsed = Cli::try_parse_from(normalize_short_version_flag(["aip", "-v"]));
+        let parsed = Cli::try_parse_from(normalize_short_flags(["aip", "-v"]));
         assert!(parsed.is_err());
         let error = parsed.err().expect("expected -v to trigger clap output");
 
@@ -76,7 +76,7 @@ mod tests {
 
     #[test]
     fn help_short_option_displays_help() {
-        let parsed = Cli::try_parse_from(normalize_short_version_flag(["aip", "-h"]));
+        let parsed = Cli::try_parse_from(normalize_short_flags(["aip", "-h"]));
         assert!(parsed.is_err());
         let error = parsed.err().expect("expected -h to trigger clap output");
 
@@ -84,8 +84,8 @@ mod tests {
     }
 
     #[test]
-    fn normalize_short_version_flag_converts_short_help_to_long_help() {
-        let normalized = normalize_short_version_flag(["aip", "-h"]);
+    fn normalize_short_flags_converts_short_help_to_long_help() {
+        let normalized = normalize_short_flags(["aip", "-h"]);
 
         assert_eq!(
             normalized,
@@ -94,8 +94,8 @@ mod tests {
     }
 
     #[test]
-    fn normalize_short_version_flag_only_changes_first_cli_arg() {
-        let normalized = normalize_short_version_flag(["aip", "save", "-v"]);
+    fn normalize_short_flags_only_changes_first_cli_arg() {
+        let normalized = normalize_short_flags(["aip", "save", "-v"]);
 
         assert_eq!(
             normalized,

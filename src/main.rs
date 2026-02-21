@@ -20,7 +20,7 @@ use tool::Tool;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let cli = Cli::parse_from(cli::normalize_short_version_flag(std::env::args_os()));
+    let cli = Cli::parse_from(cli::normalize_short_flags(std::env::args_os()));
 
     match cli.command {
         None => cmd_dashboard().await?,
@@ -61,6 +61,9 @@ impl Drop for ScreenGuard<'_> {
     }
 }
 
+// The blocking thread will keep waiting on `read_key()` after the receiver is dropped,
+// only exiting once the next keypress unblocks it. This is a known limitation of
+// blocking terminal reads without timeout support in the `console` crate.
 fn spawn_key_reader() -> tokio::sync::mpsc::UnboundedReceiver<std::io::Result<Key>> {
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     tokio::task::spawn_blocking(move || {
@@ -333,6 +336,26 @@ struct DashboardView<'a> {
     mode: &'a DashboardMode,
 }
 
+impl<'a> DashboardView<'a> {
+    fn new(
+        tool_profiles: &'a [(Tool, Vec<String>, Option<String>)],
+        usage_caches: &'a HashMap<Tool, UsageCache>,
+        pending_tools: &'a HashSet<Tool>,
+        selectable_items: &'a [(Tool, String)],
+        selected: usize,
+        mode: &'a DashboardMode,
+    ) -> Self {
+        Self {
+            tool_profiles,
+            usage_caches,
+            pending_tools,
+            selectable_items,
+            selected,
+            mode,
+        }
+    }
+}
+
 fn render_dashboard(term: &Term, view: &DashboardView) -> Result<()> {
     term.write_str("\x1b[H")?;
 
@@ -438,19 +461,6 @@ async fn cmd_dashboard() -> Result<()> {
     let mut selected: usize = 0;
     let mut mode = DashboardMode::Normal;
 
-    macro_rules! view {
-        ($tp:expr, $uc:expr, $pt:expr, $si:expr, $sel:expr, $m:expr) => {
-            DashboardView {
-                tool_profiles: $tp,
-                usage_caches: $uc,
-                pending_tools: $pt,
-                selectable_items: $si,
-                selected: $sel,
-                mode: $m,
-            }
-        };
-    }
-
     loop {
         let tool_profiles = load_tool_profiles();
         let codex_profiles = get_codex_profiles(&tool_profiles);
@@ -473,13 +483,13 @@ async fn cmd_dashboard() -> Result<()> {
 
         render_dashboard(
             &term,
-            &view!(
+            &DashboardView::new(
                 &tool_profiles,
                 &usage_caches,
                 &pending_tools,
                 &selectable_items,
                 selected,
-                &mode
+                &mode,
             ),
         )?;
 
@@ -494,7 +504,7 @@ async fn cmd_dashboard() -> Result<()> {
                     claude_done = true;
                     render_dashboard(
                         &term,
-                        &view!(&tool_profiles, &usage_caches, &pending_tools, &selectable_items, selected, &mode),
+                        &DashboardView::new(&tool_profiles, &usage_caches, &pending_tools, &selectable_items, selected, &mode),
                     )?;
                 }
                 cache = &mut codex_future, if !codex_done => {
@@ -503,7 +513,7 @@ async fn cmd_dashboard() -> Result<()> {
                     codex_done = true;
                     render_dashboard(
                         &term,
-                        &view!(&tool_profiles, &usage_caches, &pending_tools, &selectable_items, selected, &mode),
+                        &DashboardView::new(&tool_profiles, &usage_caches, &pending_tools, &selectable_items, selected, &mode),
                     )?;
                 }
                 Some(key_result) = key_rx.recv() => {
@@ -528,7 +538,7 @@ async fn cmd_dashboard() -> Result<()> {
                         DashboardAction::Render => {
                             render_dashboard(
                                 &term,
-                                &view!(&tool_profiles, &usage_caches, &pending_tools, &selectable_items, selected, &mode),
+                                &DashboardView::new(&tool_profiles, &usage_caches, &pending_tools, &selectable_items, selected, &mode),
                             )?;
                         }
                         DashboardAction::None => {}
@@ -544,13 +554,13 @@ async fn cmd_dashboard() -> Result<()> {
         // Phase 2: All data fetched — render final "Updated" state
         render_dashboard(
             &term,
-            &view!(
+            &DashboardView::new(
                 &tool_profiles,
                 &usage_caches,
                 &pending_tools,
                 &selectable_items,
                 selected,
-                &mode
+                &mode,
             ),
         )?;
 
@@ -579,7 +589,7 @@ async fn cmd_dashboard() -> Result<()> {
                         DashboardAction::Render => {
                             render_dashboard(
                                 &term,
-                                &view!(&tool_profiles, &usage_caches, &pending_tools, &selectable_items, selected, &mode),
+                                &DashboardView::new(&tool_profiles, &usage_caches, &pending_tools, &selectable_items, selected, &mode),
                             )?;
                         }
                         DashboardAction::None => {}

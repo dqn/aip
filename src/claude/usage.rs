@@ -62,7 +62,7 @@ fn is_token_expired(oauth: &OAuthData) -> bool {
             if now_ms < 0 {
                 return true;
             }
-            now_ms as u64 + 300_000 >= expires_at
+            (now_ms as u64).saturating_add(300_000) >= expires_at
         }
         None => false,
     }
@@ -95,17 +95,19 @@ async fn refresh_token(oauth: &OAuthData) -> Result<TokenResponse> {
     Ok(resp.json().await?)
 }
 
-fn apply_token_response(raw: &mut Value, token_resp: &TokenResponse) {
-    if let Some(oauth) = raw.get_mut("claudeAiOauth") {
-        oauth["accessToken"] = Value::String(token_resp.access_token.clone());
-        if let Some(new_refresh) = &token_resp.refresh_token {
-            oauth["refreshToken"] = Value::String(new_refresh.clone());
-        }
-        let expires_in = token_resp.expires_in.unwrap_or(3600);
-        let now_ms = Utc::now().timestamp_millis().max(0) as u64;
-        let new_expires_at = now_ms + expires_in.saturating_mul(1000);
-        oauth["expiresAt"] = Value::Number(new_expires_at.into());
+fn apply_token_response(raw: &mut Value, token_resp: &TokenResponse) -> Result<()> {
+    let oauth = raw
+        .get_mut("claudeAiOauth")
+        .ok_or_else(|| anyhow!("no claudeAiOauth key in credentials"))?;
+    oauth["accessToken"] = Value::String(token_resp.access_token.clone());
+    if let Some(new_refresh) = &token_resp.refresh_token {
+        oauth["refreshToken"] = Value::String(new_refresh.clone());
     }
+    let expires_in = token_resp.expires_in.unwrap_or(3600);
+    let now_ms = Utc::now().timestamp_millis().max(0) as u64;
+    let new_expires_at = now_ms + expires_in.saturating_mul(1000);
+    oauth["expiresAt"] = Value::Number(new_expires_at.into());
+    Ok(())
 }
 
 async fn get_access_token() -> Result<(String, ProfileInfo)> {
@@ -123,7 +125,7 @@ async fn get_access_token() -> Result<(String, ProfileInfo)> {
     // Token expired, refresh it
     let token_resp = refresh_token(&oauth).await?;
     let access_token = token_resp.access_token.clone();
-    apply_token_response(&mut raw, &token_resp);
+    apply_token_response(&mut raw, &token_resp)?;
     keychain::write(&raw)?;
 
     Ok((access_token, info))
@@ -181,7 +183,7 @@ async fn get_access_token_from_credentials(path: &Path) -> Result<(String, Profi
         .await
         .map_err(|_| anyhow!("Refresh token expired (switch to this profile to re-auth)"))?;
     let access_token = token_resp.access_token.clone();
-    apply_token_response(&mut raw, &token_resp);
+    apply_token_response(&mut raw, &token_resp)?;
     let tmp = path.with_extension("tmp");
     std::fs::write(&tmp, serde_json::to_string_pretty(&raw)?)?;
     std::fs::rename(&tmp, path)?;

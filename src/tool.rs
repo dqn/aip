@@ -43,14 +43,14 @@ impl Tool {
 
     pub fn profile_dir(&self, name: &str) -> Result<PathBuf> {
         if name.is_empty()
-            || name.contains('/')
-            || name.contains('\\')
-            || name.contains('\0')
-            || name == ".."
-            || name == "."
-            || name.trim() != name
+            || !name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
         {
-            return Err(anyhow!("invalid profile name: '{}'", name));
+            return Err(anyhow!(
+                "invalid profile name: '{}' (only ASCII alphanumeric, '-', '_' allowed)",
+                name
+            ));
         }
         Ok(self.profiles_dir()?.join(name))
     }

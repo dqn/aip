@@ -7,6 +7,8 @@ use serde_json::Value;
 
 use crate::tool::Tool;
 
+// These constants are reverse-engineered from the Codex CLI binary.
+// They may need updating when the upstream tool changes.
 const USAGE_URL: &str = "https://chatgpt.com/backend-api/wham/usage";
 const TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
 const CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
@@ -145,15 +147,19 @@ async fn fetch_from_auth_path(path: &Path) -> Result<Option<RateLimits>> {
     let refresh_resp = do_refresh_token(&tokens.refresh_token).await?;
     apply_refresh(&mut raw, &refresh_resp);
 
-    let new_tokens = read_tokens(&raw)?;
-    if new_tokens.access_token == tokens.access_token {
-        return Err(anyhow!("token refresh returned no new access token"));
+    let new_access_token = refresh_resp
+        .access_token
+        .as_deref()
+        .ok_or_else(|| anyhow!("token refresh returned no new access token"))?;
+    if new_access_token == tokens.access_token {
+        return Err(anyhow!("token refresh returned the same access token"));
     }
 
     let tmp = path.with_extension("tmp");
     std::fs::write(&tmp, serde_json::to_string_pretty(&raw)?)?;
     std::fs::rename(&tmp, path)?;
 
+    let new_tokens = read_tokens(&raw)?;
     let resp = fetch_usage_api(&new_tokens).await?;
     parse_usage_response(resp).await
 }
