@@ -52,11 +52,12 @@ enum DashboardAction {
     Quit,
 }
 
-struct CursorGuard<'a>(&'a Term);
+struct ScreenGuard<'a>(&'a Term);
 
-impl Drop for CursorGuard<'_> {
+impl Drop for ScreenGuard<'_> {
     fn drop(&mut self) {
         let _ = self.0.show_cursor();
+        let _ = self.0.write_str("\x1b[?1049l");
     }
 }
 
@@ -325,10 +326,8 @@ struct DashboardView<'a> {
     mode: &'a DashboardMode,
 }
 
-fn render_dashboard(term: &Term, rendered_lines: &mut usize, view: &DashboardView) -> Result<()> {
-    if *rendered_lines > 0 {
-        term.clear_last_lines(*rendered_lines)?;
-    }
+fn render_dashboard(term: &Term, view: &DashboardView) -> Result<()> {
+    term.write_str("\x1b[H")?;
 
     let lines = build_dashboard_lines(
         view.tool_profiles,
@@ -339,9 +338,10 @@ fn render_dashboard(term: &Term, rendered_lines: &mut usize, view: &DashboardVie
         view.mode,
     );
     for line in &lines {
-        term.write_line(line)?;
+        term.write_str(line)?;
+        term.write_str("\x1b[K\n")?;
     }
-    *rendered_lines = lines.len();
+    term.write_str("\x1b[J")?;
 
     Ok(())
 }
@@ -422,10 +422,10 @@ fn handle_dashboard_key(
 
 async fn cmd_dashboard() -> Result<()> {
     let term = Term::stderr();
+    term.write_str("\x1b[?1049h")?;
     term.hide_cursor()?;
-    let _guard = CursorGuard(&term);
+    let _guard = ScreenGuard(&term);
 
-    let mut rendered_lines: usize = 0;
     let mut usage_caches: HashMap<Tool, UsageCache> = HashMap::new();
     let mut key_rx = spawn_key_reader();
     let mut selected: usize = 0;
@@ -466,7 +466,6 @@ async fn cmd_dashboard() -> Result<()> {
 
         render_dashboard(
             &term,
-            &mut rendered_lines,
             &view!(
                 &tool_profiles,
                 &usage_caches,
@@ -488,7 +487,6 @@ async fn cmd_dashboard() -> Result<()> {
                     claude_done = true;
                     render_dashboard(
                         &term,
-                        &mut rendered_lines,
                         &view!(&tool_profiles, &usage_caches, &pending_tools, &selectable_items, selected, &mode),
                     )?;
                 }
@@ -498,7 +496,6 @@ async fn cmd_dashboard() -> Result<()> {
                     codex_done = true;
                     render_dashboard(
                         &term,
-                        &mut rendered_lines,
                         &view!(&tool_profiles, &usage_caches, &pending_tools, &selectable_items, selected, &mode),
                     )?;
                 }
@@ -512,7 +509,6 @@ async fn cmd_dashboard() -> Result<()> {
                         &tool_profiles,
                     ) {
                         DashboardAction::Quit => {
-                            term.clear_last_lines(rendered_lines)?;
                             return Ok(());
                         }
                         DashboardAction::Reload => {
@@ -522,7 +518,6 @@ async fn cmd_dashboard() -> Result<()> {
                         DashboardAction::Render => {
                             render_dashboard(
                                 &term,
-                                &mut rendered_lines,
                                 &view!(&tool_profiles, &usage_caches, &pending_tools, &selectable_items, selected, &mode),
                             )?;
                         }
@@ -539,7 +534,6 @@ async fn cmd_dashboard() -> Result<()> {
         // Phase 2: All data fetched — render final "Updated" state
         render_dashboard(
             &term,
-            &mut rendered_lines,
             &view!(
                 &tool_profiles,
                 &usage_caches,
@@ -563,7 +557,6 @@ async fn cmd_dashboard() -> Result<()> {
                         &tool_profiles,
                     ) {
                         DashboardAction::Quit => {
-                            term.clear_last_lines(rendered_lines)?;
                             return Ok(());
                         }
                         DashboardAction::Reload => {
@@ -573,7 +566,6 @@ async fn cmd_dashboard() -> Result<()> {
                         DashboardAction::Render => {
                             render_dashboard(
                                 &term,
-                                &mut rendered_lines,
                                 &view!(&tool_profiles, &usage_caches, &pending_tools, &selectable_items, selected, &mode),
                             )?;
                         }
