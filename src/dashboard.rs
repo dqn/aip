@@ -284,7 +284,7 @@ impl DashboardView<'_> {
         match self.mode {
             DashboardMode::Normal => {
                 lines.push(
-                    "[↑↓] Navigate  [J/K] Reorder  [Enter/Space] Switch  [BS/Del] Delete  [ESC/q] Quit"
+                    "[↑↓] Navigate  [Shift+J/K] Reorder  [Enter/Space] Switch  [BS/Del] Delete  [ESC/q] Quit"
                         .to_string(),
                 );
             }
@@ -336,29 +336,30 @@ fn tool_profiles_for(
 }
 
 fn handle_move(
-    selected: usize,
+    selected: &mut usize,
     selectable_items: &[(Tool, String)],
     tool_profiles: &[(Tool, Vec<String>, Option<String>)],
     direction: i32, // -1 for up, 1 for down
 ) -> DashboardAction {
-    let (tool, _) = &selectable_items[selected];
+    let (tool, _) = &selectable_items[*selected];
     let range = tool_item_range(*tool, selectable_items);
 
     // No-op if single profile or at boundary
     if range.len() <= 1 {
         return DashboardAction::None;
     }
-    let target = selected as i32 + direction;
+    let target = *selected as i32 + direction;
     if target < range.start as i32 || target >= range.end as i32 {
         return DashboardAction::None;
     }
 
     let mut profiles = tool_profiles_for(*tool, tool_profiles);
-    let local_idx = selected - range.start;
+    let local_idx = *selected - range.start;
     let target_local = target as usize - range.start;
     profiles.swap(local_idx, target_local);
 
     if tool.save_profile_order(&profiles).is_ok() {
+        *selected = target as usize;
         DashboardAction::Reload
     } else {
         DashboardAction::None
@@ -417,8 +418,8 @@ fn handle_dashboard_key(
                 *mode = DashboardMode::DeleteConfirm(*selected);
                 DashboardAction::Render
             }
-            Key::Char('K') => handle_move(*selected, selectable_items, tool_profiles, -1),
-            Key::Char('J') => handle_move(*selected, selectable_items, tool_profiles, 1),
+            Key::Char('K') => handle_move(selected, selectable_items, tool_profiles, -1),
+            Key::Char('J') => handle_move(selected, selectable_items, tool_profiles, 1),
             Key::Escape | Key::Char('q') => DashboardAction::Quit,
             _ => DashboardAction::None,
         },
@@ -1152,6 +1153,48 @@ mod tests {
 
         let codex_profiles = tool_profiles_for(Tool::Codex, &tool_profiles);
         assert!(codex_profiles.is_empty());
+    }
+
+    #[test]
+    fn handle_dashboard_key_move_down_updates_selected() {
+        let tool_profiles = sample_tool_profiles();
+        let selectable_items = build_selectable_items(&tool_profiles);
+        let mut selected = 0; // "personal" for Claude
+        let mut mode = DashboardMode::Normal;
+
+        let action = handle_dashboard_key(
+            Key::Char('J'),
+            &mut selected,
+            &mut mode,
+            &selectable_items,
+            &tool_profiles,
+        );
+        // handle_move calls save_profile_order which may fail in test env,
+        // but selected should still be updated on success (Reload) or unchanged (None).
+        match action {
+            DashboardAction::Reload => assert_eq!(selected, 1),
+            _ => assert_eq!(selected, 0),
+        }
+    }
+
+    #[test]
+    fn handle_dashboard_key_move_up_updates_selected() {
+        let tool_profiles = sample_tool_profiles();
+        let selectable_items = build_selectable_items(&tool_profiles);
+        let mut selected = 1; // "work" for Claude
+        let mut mode = DashboardMode::Normal;
+
+        let action = handle_dashboard_key(
+            Key::Char('K'),
+            &mut selected,
+            &mut mode,
+            &selectable_items,
+            &tool_profiles,
+        );
+        match action {
+            DashboardAction::Reload => assert_eq!(selected, 0),
+            _ => assert_eq!(selected, 1),
+        }
     }
 
     #[test]
