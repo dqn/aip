@@ -219,19 +219,14 @@ pub async fn fetch_all_profiles_usage() -> HashMap<String, Result<(UsageResponse
             let result = if is_current {
                 fetch_usage().await
             } else {
-                match Tool::Claude.profile_dir(&profile) {
-                    Ok(dir) => {
-                        let creds_path = dir.join("credentials.json");
-                        match get_access_token_from_credentials(&creds_path).await {
-                            Ok((token, info)) => match fetch_usage_with_token(&token).await {
-                                Ok(usage) => Ok((usage, info)),
-                                Err(e) => Err(e),
-                            },
-                            Err(e) => Err(e),
-                        }
-                    }
-                    Err(e) => Err(e),
+                async {
+                    let dir = Tool::Claude.profile_dir(&profile)?;
+                    let creds_path = dir.join("credentials.json");
+                    let (token, info) = get_access_token_from_credentials(&creds_path).await?;
+                    let usage = fetch_usage_with_token(&token).await?;
+                    Ok((usage, info))
                 }
+                .await
             };
             (profile, result)
         }));

@@ -174,13 +174,12 @@ async fn prefetch_codex_usage(profiles: &[String]) -> UsageCache {
             let result = if is_current {
                 codex::usage::fetch_usage().await
             } else {
-                match Tool::Codex.profile_dir(&p) {
-                    Ok(dir) => {
-                        let auth_path = dir.join("auth.json");
-                        codex::usage::fetch_usage_from_auth(&auth_path).await
-                    }
-                    Err(e) => Err(e),
+                async {
+                    let dir = Tool::Codex.profile_dir(&p)?;
+                    let auth_path = dir.join("auth.json");
+                    codex::usage::fetch_usage_from_auth(&auth_path).await
                 }
+                .await
             };
             (
                 p,
@@ -225,13 +224,10 @@ fn get_codex_profiles(tool_profiles: &[(Tool, Vec<String>, Option<String>)]) -> 
 fn build_selectable_items(
     tool_profiles: &[(Tool, Vec<String>, Option<String>)],
 ) -> Vec<(Tool, String)> {
-    let mut items = Vec::new();
-    for (tool, profiles, _) in tool_profiles {
-        for profile in profiles {
-            items.push((*tool, profile.clone()));
-        }
-    }
-    items
+    tool_profiles
+        .iter()
+        .flat_map(|(tool, profiles, _)| profiles.iter().map(move |p| (*tool, p.clone())))
+        .collect()
 }
 
 fn is_current_profile(
@@ -268,7 +264,7 @@ fn build_dashboard_lines(
     let mut item_idx = 0;
 
     for (tool, profiles, current) in tool_profiles {
-        lines.push(format!("{}", tool));
+        lines.push(tool.to_string());
 
         if profiles.is_empty() {
             lines.push("  (no profiles)".to_string());
