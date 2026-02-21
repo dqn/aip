@@ -980,6 +980,7 @@ mod tests {
         assert_eq!(capitalize_first("pro"), "Pro");
         assert_eq!(capitalize_first(""), "");
         assert_eq!(capitalize_first("Pro"), "Pro");
+        assert_eq!(capitalize_first("日本語"), "日本語");
     }
 
     #[test]

@@ -39,6 +39,8 @@ pub fn format_usage_line(
     resets_at: Option<DateTime<Utc>>,
     mode: &DisplayMode,
 ) -> String {
+    // danger_color is always based on used% (not display_percent)
+    // so color reflects how close to the limit regardless of display mode
     let color = danger_color(percent);
     let (display_percent, colored_mode_label) = match mode {
         DisplayMode::Used => (percent, format!("{color}used{RESET}")),
