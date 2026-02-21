@@ -61,6 +61,21 @@ impl Tool {
         Ok(self.profiles_dir()?.join(name))
     }
 
+    pub fn delete_profile(&self, name: &str) -> Result<()> {
+        let current = self.current_profile()?;
+        if current.as_deref() == Some(name) {
+            return Err(anyhow!("cannot delete the current profile '{}'", name));
+        }
+
+        let profile_dir = self.profile_dir(name)?;
+        if !profile_dir.exists() {
+            return Err(anyhow!("profile '{}' does not exist for {}", name, self));
+        }
+
+        std::fs::remove_dir_all(&profile_dir)?;
+        Ok(())
+    }
+
     pub fn list_profiles(&self) -> Result<Vec<String>> {
         let profiles_dir = self.profiles_dir()?;
         if !profiles_dir.exists() {

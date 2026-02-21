@@ -7,6 +7,8 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use super::keychain;
+use crate::fs_util;
+use crate::http::shared_client;
 use crate::tool::Tool;
 
 const CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
@@ -136,16 +138,6 @@ async fn get_access_token() -> Result<(String, ProfileInfo)> {
     Ok((access_token, info))
 }
 
-fn shared_client() -> &'static reqwest::Client {
-    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
-    CLIENT.get_or_init(|| {
-        reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(15))
-            .build()
-            .expect("failed to build HTTP client")
-    })
-}
-
 pub async fn fetch_usage() -> Result<(UsageResponse, ProfileInfo)> {
     let (token, info) = get_access_token().await?;
     let usage = fetch_usage_with_token(&token).await?;
@@ -194,12 +186,7 @@ async fn get_access_token_from_credentials(path: &Path) -> Result<(String, Profi
         .map_err(|_| anyhow!("Refresh token expired (switch to this profile to re-auth)"))?;
     let access_token = token_resp.access_token.clone();
     apply_token_response(&mut raw, &token_resp)?;
-    let tmp = path.with_extension("tmp");
-    std::fs::write(&tmp, serde_json::to_string_pretty(&raw)?)?;
-    if let Err(e) = std::fs::rename(&tmp, path) {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(e.into());
-    }
+    fs_util::atomic_write(path, &serde_json::to_string_pretty(&raw)?)?;
 
     Ok((access_token, info))
 }

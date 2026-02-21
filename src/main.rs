@@ -2,6 +2,8 @@ mod claude;
 mod cli;
 mod codex;
 mod display;
+mod fs_util;
+mod http;
 mod tool;
 
 use std::collections::{HashMap, HashSet};
@@ -242,87 +244,6 @@ fn is_current_profile(
         == Some(profile)
 }
 
-fn build_dashboard_lines(
-    tool_profiles: &[(Tool, Vec<String>, Option<String>)],
-    usage_caches: &HashMap<Tool, UsageCache>,
-    pending_tools: &HashSet<Tool>,
-    selectable_items: &[(Tool, String)],
-    selected: usize,
-    mode: &DashboardMode,
-) -> Vec<String> {
-    let mut lines = Vec::new();
-
-    let header = if pending_tools.is_empty() {
-        let timestamp = Local::now().format("%H:%M:%S");
-        format!("aip - Usage Monitor (5s refresh)  Updated: {}", timestamp)
-    } else {
-        "aip - Usage Monitor (5s refresh)  Refreshing...".to_string()
-    };
-    lines.push(header);
-    lines.push(String::new());
-
-    let mut item_idx = 0;
-
-    for (tool, profiles, current) in tool_profiles {
-        lines.push(tool.to_string());
-
-        if profiles.is_empty() {
-            lines.push("  (no profiles)".to_string());
-        } else {
-            let cache = usage_caches.get(tool);
-            for profile in profiles {
-                let is_selected = item_idx < selectable_items.len() && item_idx == selected;
-                let cursor = if is_selected { ">" } else { " " };
-                let marker = if current.as_deref() == Some(profile.as_str()) {
-                    " \x1b[32m✓\x1b[0m"
-                } else {
-                    ""
-                };
-                let plan_suffix = cache
-                    .and_then(|c| c.get(profile))
-                    .and_then(|entry| entry.plan_type.as_deref())
-                    .map(|pt| format!(" ({})", capitalize_first(pt)))
-                    .unwrap_or_default();
-                let line = format!("{} {}{}{}", cursor, profile, marker, plan_suffix);
-                if is_selected {
-                    lines.push(format!("\x1b[1;36m{}\x1b[0m", line));
-                } else {
-                    lines.push(line);
-                }
-
-                if let Some(entry) = cache.and_then(|c| c.get(profile)) {
-                    for line in &entry.lines {
-                        lines.push(format!("    {}", line));
-                    }
-                } else if pending_tools.contains(tool) {
-                    lines.push("    (loading...)".to_string());
-                } else {
-                    lines.push("    (no data)".to_string());
-                }
-
-                item_idx += 1;
-            }
-        }
-
-        lines.push(String::new());
-    }
-
-    match mode {
-        DashboardMode::Normal => {
-            lines.push(
-                "[↑↓] Navigate  [Enter/Space] Switch  [BS/Del] Delete  [ESC/q] Quit".to_string(),
-            );
-        }
-        DashboardMode::DeleteConfirm(idx) => {
-            if let Some((tool, profile)) = selectable_items.get(*idx) {
-                lines.push(format!("Delete '{}' for {}? [y/n]", profile, tool));
-            }
-        }
-    }
-
-    lines
-}
-
 struct DashboardView<'a> {
     tool_profiles: &'a [(Tool, Vec<String>, Option<String>)],
     usage_caches: &'a HashMap<Tool, UsageCache>,
@@ -350,26 +271,94 @@ impl<'a> DashboardView<'a> {
             mode,
         }
     }
-}
 
-fn render_dashboard(term: &Term, view: &DashboardView) -> Result<()> {
-    term.write_str("\x1b[H")?;
+    fn build_lines(&self) -> Vec<String> {
+        let mut lines = Vec::new();
 
-    let lines = build_dashboard_lines(
-        view.tool_profiles,
-        view.usage_caches,
-        view.pending_tools,
-        view.selectable_items,
-        view.selected,
-        view.mode,
-    );
-    for line in &lines {
-        term.write_str(line)?;
-        term.write_str("\x1b[K\n")?;
+        let header = if self.pending_tools.is_empty() {
+            let timestamp = Local::now().format("%H:%M:%S");
+            format!("aip - Usage Monitor (5s refresh)  Updated: {}", timestamp)
+        } else {
+            "aip - Usage Monitor (5s refresh)  Refreshing...".to_string()
+        };
+        lines.push(header);
+        lines.push(String::new());
+
+        let mut item_idx = 0;
+
+        for (tool, profiles, current) in self.tool_profiles {
+            lines.push(tool.to_string());
+
+            if profiles.is_empty() {
+                lines.push("  (no profiles)".to_string());
+            } else {
+                let cache = self.usage_caches.get(tool);
+                for profile in profiles {
+                    let is_selected =
+                        item_idx < self.selectable_items.len() && item_idx == self.selected;
+                    let cursor = if is_selected { ">" } else { " " };
+                    let marker = if current.as_deref() == Some(profile.as_str()) {
+                        " \x1b[32m✓\x1b[0m"
+                    } else {
+                        ""
+                    };
+                    let plan_suffix = cache
+                        .and_then(|c| c.get(profile))
+                        .and_then(|entry| entry.plan_type.as_deref())
+                        .map(|pt| format!(" ({})", capitalize_first(pt)))
+                        .unwrap_or_default();
+                    let line = format!("{} {}{}{}", cursor, profile, marker, plan_suffix);
+                    if is_selected {
+                        lines.push(format!("\x1b[1;36m{}\x1b[0m", line));
+                    } else {
+                        lines.push(line);
+                    }
+
+                    if let Some(entry) = cache.and_then(|c| c.get(profile)) {
+                        for line in &entry.lines {
+                            lines.push(format!("    {}", line));
+                        }
+                    } else if self.pending_tools.contains(tool) {
+                        lines.push("    (loading...)".to_string());
+                    } else {
+                        lines.push("    (no data)".to_string());
+                    }
+
+                    item_idx += 1;
+                }
+            }
+
+            lines.push(String::new());
+        }
+
+        match self.mode {
+            DashboardMode::Normal => {
+                lines.push(
+                    "[↑↓] Navigate  [Enter/Space] Switch  [BS/Del] Delete  [ESC/q] Quit"
+                        .to_string(),
+                );
+            }
+            DashboardMode::DeleteConfirm(idx) => {
+                if let Some((tool, profile)) = self.selectable_items.get(*idx) {
+                    lines.push(format!("Delete '{}' for {}? [y/n]", profile, tool));
+                }
+            }
+        }
+
+        lines
     }
-    term.write_str("\x1b[J")?;
 
-    Ok(())
+    fn render(&self, term: &Term) -> Result<()> {
+        term.write_str("\x1b[H")?;
+
+        for line in &self.build_lines() {
+            term.write_str(line)?;
+            term.write_str("\x1b[K\n")?;
+        }
+        term.write_str("\x1b[J")?;
+
+        Ok(())
+    }
 }
 
 fn handle_dashboard_key(
@@ -446,6 +435,26 @@ fn handle_dashboard_key(
     }
 }
 
+fn render_dashboard(
+    term: &Term,
+    tool_profiles: &[(Tool, Vec<String>, Option<String>)],
+    usage_caches: &HashMap<Tool, UsageCache>,
+    pending_tools: &HashSet<Tool>,
+    selectable_items: &[(Tool, String)],
+    selected: usize,
+    mode: &DashboardMode,
+) -> Result<()> {
+    DashboardView::new(
+        tool_profiles,
+        usage_caches,
+        pending_tools,
+        selectable_items,
+        selected,
+        mode,
+    )
+    .render(term)
+}
+
 async fn cmd_dashboard() -> Result<()> {
     let term = Term::stderr();
     term.write_str("\x1b[?1049h")?;
@@ -479,14 +488,12 @@ async fn cmd_dashboard() -> Result<()> {
 
         render_dashboard(
             &term,
-            &DashboardView::new(
-                &tool_profiles,
-                &usage_caches,
-                &pending_tools,
-                &selectable_items,
-                selected,
-                &mode,
-            ),
+            &tool_profiles,
+            &usage_caches,
+            &pending_tools,
+            &selectable_items,
+            selected,
+            &mode,
         )?;
 
         let mut needs_reload = false;
@@ -500,7 +507,12 @@ async fn cmd_dashboard() -> Result<()> {
                     claude_done = true;
                     render_dashboard(
                         &term,
-                        &DashboardView::new(&tool_profiles, &usage_caches, &pending_tools, &selectable_items, selected, &mode),
+                        &tool_profiles,
+                        &usage_caches,
+                        &pending_tools,
+                        &selectable_items,
+                        selected,
+                        &mode,
                     )?;
                 }
                 cache = &mut codex_future, if !codex_done => {
@@ -509,7 +521,12 @@ async fn cmd_dashboard() -> Result<()> {
                     codex_done = true;
                     render_dashboard(
                         &term,
-                        &DashboardView::new(&tool_profiles, &usage_caches, &pending_tools, &selectable_items, selected, &mode),
+                        &tool_profiles,
+                        &usage_caches,
+                        &pending_tools,
+                        &selectable_items,
+                        selected,
+                        &mode,
                     )?;
                 }
                 Some(key_result) = key_rx.recv() => {
@@ -534,7 +551,12 @@ async fn cmd_dashboard() -> Result<()> {
                         DashboardAction::Render => {
                             render_dashboard(
                                 &term,
-                                &DashboardView::new(&tool_profiles, &usage_caches, &pending_tools, &selectable_items, selected, &mode),
+                                &tool_profiles,
+                                &usage_caches,
+                                &pending_tools,
+                                &selectable_items,
+                                selected,
+                                &mode,
                             )?;
                         }
                         DashboardAction::None => {}
@@ -550,14 +572,12 @@ async fn cmd_dashboard() -> Result<()> {
         // Phase 2: All data fetched — render final "Updated" state
         render_dashboard(
             &term,
-            &DashboardView::new(
-                &tool_profiles,
-                &usage_caches,
-                &pending_tools,
-                &selectable_items,
-                selected,
-                &mode,
-            ),
+            &tool_profiles,
+            &usage_caches,
+            &pending_tools,
+            &selectable_items,
+            selected,
+            &mode,
         )?;
 
         // Phase 3: Wait for refresh interval or user interaction
@@ -585,7 +605,12 @@ async fn cmd_dashboard() -> Result<()> {
                         DashboardAction::Render => {
                             render_dashboard(
                                 &term,
-                                &DashboardView::new(&tool_profiles, &usage_caches, &pending_tools, &selectable_items, selected, &mode),
+                                &tool_profiles,
+                                &usage_caches,
+                                &pending_tools,
+                                &selectable_items,
+                                selected,
+                                &mode,
                             )?;
                         }
                         DashboardAction::None => {}
@@ -641,6 +666,25 @@ fn cmd_save(tool_arg: Option<String>, profile_arg: Option<String>) -> Result<()>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn build_lines(
+        tool_profiles: &[(Tool, Vec<String>, Option<String>)],
+        usage_caches: &HashMap<Tool, UsageCache>,
+        pending_tools: &HashSet<Tool>,
+        selectable_items: &[(Tool, String)],
+        selected: usize,
+        mode: &DashboardMode,
+    ) -> Vec<String> {
+        DashboardView::new(
+            tool_profiles,
+            usage_caches,
+            pending_tools,
+            selectable_items,
+            selected,
+            mode,
+        )
+        .build_lines()
+    }
 
     fn make_entry(lines: Vec<String>, plan_type: Option<&str>) -> ProfileUsageCache {
         ProfileUsageCache {
@@ -707,7 +751,7 @@ mod tests {
         )];
         let selectable_items = build_selectable_items(&tool_profiles);
 
-        let lines = build_dashboard_lines(
+        let lines = build_lines(
             &tool_profiles,
             &HashMap::new(),
             &HashSet::new(),
@@ -725,7 +769,7 @@ mod tests {
         let tool_profiles = vec![(Tool::Claude, vec![], None), (Tool::Codex, vec![], None)];
         let selectable_items = build_selectable_items(&tool_profiles);
 
-        let lines = build_dashboard_lines(
+        let lines = build_lines(
             &tool_profiles,
             &HashMap::new(),
             &HashSet::new(),
@@ -747,7 +791,7 @@ mod tests {
         )];
         let selectable_items = build_selectable_items(&tool_profiles);
 
-        let lines = build_dashboard_lines(
+        let lines = build_lines(
             &tool_profiles,
             &HashMap::new(),
             &HashSet::new(),
@@ -773,7 +817,7 @@ mod tests {
         )];
         let selectable_items = build_selectable_items(&tool_profiles);
 
-        let lines = build_dashboard_lines(
+        let lines = build_lines(
             &tool_profiles,
             &HashMap::new(),
             &HashSet::new(),
@@ -801,7 +845,7 @@ mod tests {
         usage_caches.insert(Tool::Claude, claude_cache);
         let selectable_items = build_selectable_items(&tool_profiles);
 
-        let lines = build_dashboard_lines(
+        let lines = build_lines(
             &tool_profiles,
             &usage_caches,
             &HashSet::new(),
@@ -824,7 +868,7 @@ mod tests {
         let pending_tools = HashSet::from([Tool::Claude]);
         let selectable_items = build_selectable_items(&tool_profiles);
 
-        let lines = build_dashboard_lines(
+        let lines = build_lines(
             &tool_profiles,
             &HashMap::new(),
             &pending_tools,
@@ -843,7 +887,7 @@ mod tests {
         let pending_tools = HashSet::from([Tool::Claude]);
         let selectable_items = build_selectable_items(&tool_profiles);
 
-        let lines = build_dashboard_lines(
+        let lines = build_lines(
             &tool_profiles,
             &HashMap::new(),
             &pending_tools,
@@ -861,7 +905,7 @@ mod tests {
         let tool_profiles = vec![(Tool::Claude, vec![], None)];
         let selectable_items = build_selectable_items(&tool_profiles);
 
-        let lines = build_dashboard_lines(
+        let lines = build_lines(
             &tool_profiles,
             &HashMap::new(),
             &HashSet::new(),
@@ -890,7 +934,7 @@ mod tests {
         usage_caches.insert(Tool::Claude, claude_cache);
         let selectable_items = build_selectable_items(&tool_profiles);
 
-        let lines = build_dashboard_lines(
+        let lines = build_lines(
             &tool_profiles,
             &usage_caches,
             &HashSet::new(),
@@ -922,7 +966,7 @@ mod tests {
         usage_caches.insert(Tool::Claude, claude_cache);
         let selectable_items = build_selectable_items(&tool_profiles);
 
-        let lines = build_dashboard_lines(
+        let lines = build_lines(
             &tool_profiles,
             &usage_caches,
             &HashSet::new(),
@@ -943,7 +987,7 @@ mod tests {
         let tool_profiles = vec![(Tool::Claude, vec!["p".to_string()], Some("p".to_string()))];
         let selectable_items = build_selectable_items(&tool_profiles);
 
-        let lines = build_dashboard_lines(
+        let lines = build_lines(
             &tool_profiles,
             &HashMap::new(),
             &HashSet::new(),
@@ -968,7 +1012,7 @@ mod tests {
         )];
         let selectable_items = build_selectable_items(&tool_profiles);
 
-        let lines = build_dashboard_lines(
+        let lines = build_lines(
             &tool_profiles,
             &HashMap::new(),
             &HashSet::new(),

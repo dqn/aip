@@ -5,6 +5,8 @@ use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use serde_json::Value;
 
+use crate::fs_util;
+use crate::http::shared_client;
 use crate::tool::Tool;
 
 // These constants are reverse-engineered from the Codex CLI binary.
@@ -66,16 +68,6 @@ fn read_auth(path: &Path) -> Result<(Value, TokenData)> {
     let raw: Value = serde_json::from_str(&content)?;
     let tokens = read_tokens(&raw)?;
     Ok((raw, tokens))
-}
-
-fn shared_client() -> &'static reqwest::Client {
-    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
-    CLIENT.get_or_init(|| {
-        reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(15))
-            .build()
-            .expect("failed to build HTTP client")
-    })
 }
 
 async fn do_refresh_token(refresh_token: &str) -> Result<RefreshResponse> {
@@ -161,12 +153,7 @@ async fn fetch_from_auth_path(path: &Path) -> Result<Option<RateLimits>> {
         return Err(anyhow!("token refresh returned the same access token"));
     }
 
-    let tmp = path.with_extension("tmp");
-    std::fs::write(&tmp, serde_json::to_string_pretty(&raw)?)?;
-    if let Err(e) = std::fs::rename(&tmp, path) {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(e.into());
-    }
+    fs_util::atomic_write(path, &serde_json::to_string_pretty(&raw)?)?;
 
     let new_tokens = read_tokens(&raw)?;
     let resp = fetch_usage_api(&new_tokens).await?;

@@ -5,6 +5,7 @@ use std::os::unix::fs::PermissionsExt;
 use anyhow::{Result, anyhow};
 
 use super::keychain;
+use crate::fs_util;
 use crate::tool::Tool;
 
 const TOOL: Tool = Tool::Claude;
@@ -28,12 +29,7 @@ pub fn switch(profile: &str) -> Result<()> {
 
     // Atomic write for _current
     let current_file = TOOL.current_file()?;
-    let tmp = current_file.with_extension("tmp");
-    fs::write(&tmp, format!("{}\n", profile))?;
-    if let Err(e) = fs::rename(&tmp, &current_file) {
-        let _ = fs::remove_file(&tmp);
-        return Err(e.into());
-    }
+    fs_util::atomic_write(&current_file, &format!("{}\n", profile))?;
     Ok(())
 }
 
@@ -85,9 +81,7 @@ fn sync_keychain_to_current_profile() {
         Ok(j) => j,
         _ => return,
     };
-    let tmp = creds_path.with_extension("tmp");
-    if let Err(e) = fs::write(&tmp, &json).and_then(|_| fs::rename(&tmp, &creds_path)) {
-        let _ = fs::remove_file(&tmp);
+    if let Err(e) = fs_util::atomic_write(&creds_path, &json) {
         eprintln!(
             "Warning: failed to sync credentials to profile '{}': {}",
             current, e
@@ -117,16 +111,5 @@ pub fn save(name: &str) -> Result<()> {
 }
 
 pub fn delete(name: &str) -> Result<()> {
-    let current = TOOL.current_profile()?;
-    if current.as_deref() == Some(name) {
-        return Err(anyhow!("cannot delete the current profile '{}'", name));
-    }
-
-    let profile_dir = TOOL.profile_dir(name)?;
-    if !profile_dir.exists() {
-        return Err(anyhow!("profile '{}' does not exist for {}", name, TOOL));
-    }
-
-    fs::remove_dir_all(&profile_dir)?;
-    Ok(())
+    TOOL.delete_profile(name)
 }

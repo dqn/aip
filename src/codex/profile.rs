@@ -4,6 +4,7 @@ use std::os::unix::fs::PermissionsExt;
 
 use anyhow::{Result, anyhow};
 
+use crate::fs_util;
 use crate::tool::Tool;
 
 const TOOL: Tool = Tool::Codex;
@@ -21,22 +22,12 @@ pub fn switch(profile: &str) -> Result<()> {
     let src = profile_dir.join("auth.json");
     if src.exists() {
         let dest = TOOL.home_dir()?.join("auth.json");
-        let tmp = dest.with_extension("tmp");
-        fs::copy(&src, &tmp)?;
-        if let Err(e) = fs::rename(&tmp, &dest) {
-            let _ = fs::remove_file(&tmp);
-            return Err(e.into());
-        }
+        fs_util::atomic_copy(&src, &dest)?;
     }
 
     // Update _current file (atomic write)
     let current_file = TOOL.current_file()?;
-    let tmp = current_file.with_extension("tmp");
-    fs::write(&tmp, format!("{}\n", profile))?;
-    if let Err(e) = fs::rename(&tmp, &current_file) {
-        let _ = fs::remove_file(&tmp);
-        return Err(e.into());
-    }
+    fs_util::atomic_write(&current_file, &format!("{}\n", profile))?;
 
     Ok(())
 }
@@ -88,9 +79,7 @@ fn sync_auth_to_current_profile() {
         return;
     }
 
-    let tmp = dest.with_extension("tmp");
-    if let Err(e) = fs::copy(&src, &tmp).and_then(|_| fs::rename(&tmp, &dest)) {
-        let _ = fs::remove_file(&tmp);
+    if let Err(e) = fs_util::atomic_copy(&src, &dest) {
         eprintln!(
             "Warning: failed to sync auth to profile '{}': {}",
             current, e
@@ -121,16 +110,5 @@ pub fn save(name: &str) -> Result<()> {
 }
 
 pub fn delete(name: &str) -> Result<()> {
-    let current = TOOL.current_profile()?;
-    if current.as_deref() == Some(name) {
-        return Err(anyhow!("cannot delete the current profile '{}'", name));
-    }
-
-    let profile_dir = TOOL.profile_dir(name)?;
-    if !profile_dir.exists() {
-        return Err(anyhow!("profile '{}' does not exist for {}", name, TOOL));
-    }
-
-    fs::remove_dir_all(&profile_dir)?;
-    Ok(())
+    TOOL.delete_profile(name)
 }
