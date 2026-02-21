@@ -9,7 +9,7 @@ mod tool;
 
 use anyhow::Result;
 use clap::Parser;
-use dialoguer::{Input, Select};
+use dialoguer::{Confirm, Input, Select};
 
 use cli::{Cli, Command};
 use tool::Tool;
@@ -59,6 +59,19 @@ fn cmd_save(tool_arg: Option<String>, profile_arg: Option<String>) -> Result<()>
         Some(p) => p,
         None => Input::new().with_prompt("Profile name").interact_text()?,
     };
+
+    if tool.profile_dir(&name)?.exists() {
+        let confirmed = Confirm::new()
+            .with_prompt(format!(
+                "Profile '{}' already exists for {}. Overwrite?",
+                name, tool
+            ))
+            .default(false)
+            .interact()?;
+        if !confirmed {
+            return Ok(());
+        }
+    }
 
     match tool {
         Tool::Claude => claude::profile::save(&name)?,

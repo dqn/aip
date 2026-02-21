@@ -94,10 +94,6 @@ pub fn save(name: &str) -> Result<()> {
     }
 
     let dest_dir = TOOL.profile_dir(name)?;
-    if dest_dir.exists() {
-        return Err(anyhow!("profile '{}' already exists for {}", name, TOOL));
-    }
-
     fs::create_dir_all(&dest_dir)?;
     let dest_path = dest_dir.join("auth.json");
     if let Err(e) = fs::copy(&src, &dest_path) {
