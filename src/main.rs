@@ -275,7 +275,7 @@ fn build_dashboard_lines(
                 let is_selected = item_idx < selectable_items.len() && item_idx == selected;
                 let cursor = if is_selected { ">" } else { " " };
                 let marker = if current.as_deref() == Some(profile.as_str()) {
-                    " *"
+                    " \x1b[32m✓\x1b[0m"
                 } else {
                     ""
                 };
@@ -742,8 +742,12 @@ mod tests {
             &DashboardMode::Normal,
         );
 
-        assert!(lines.iter().any(|l| l.contains("personal *")));
-        assert!(!lines.iter().any(|l| l.contains("work *")));
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("personal \x1b[32m✓\x1b[0m"))
+        );
+        assert!(!lines.iter().any(|l| l.contains("work \x1b[32m✓\x1b[0m")));
     }
 
     #[test]
@@ -881,7 +885,11 @@ mod tests {
             &DashboardMode::Normal,
         );
 
-        assert!(lines.iter().any(|l| l.contains("personal * (Pro)")));
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("personal \x1b[32m✓\x1b[0m (Pro)"))
+        );
     }
 
     #[test]
@@ -909,7 +917,10 @@ mod tests {
             &DashboardMode::Normal,
         );
 
-        let profile_line = lines.iter().find(|l| l.contains("personal *")).unwrap();
+        let profile_line = lines
+            .iter()
+            .find(|l| l.contains("personal \x1b[32m✓\x1b[0m"))
+            .unwrap();
         assert!(!profile_line.contains("("));
     }
 
