@@ -20,6 +20,7 @@ pub enum DisplayMode {
 }
 
 pub fn render_bar(percent: f64, color: &str) -> String {
+    let percent = percent.clamp(0.0, 100.0);
     let filled = ((percent / 100.0) * BAR_WIDTH as f64).round() as usize;
     let filled = filled.min(BAR_WIDTH);
     let empty = BAR_WIDTH - filled;
@@ -70,12 +71,66 @@ pub fn format_reset_time(reset_utc: DateTime<Utc>) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{DisplayMode, format_usage_line};
+    use super::*;
 
     #[test]
     fn format_usage_line_handles_session_not_started() {
         let line = format_usage_line("5-hour", 0.0, None, &DisplayMode::Used);
 
         assert!(line.contains("session not started"));
+    }
+
+    #[test]
+    fn render_bar_zero_percent() {
+        let bar = render_bar(0.0, "\x1b[32m");
+        assert!(!bar.contains('\u{2588}'));
+        assert_eq!(bar.matches('\u{2591}').count(), BAR_WIDTH);
+    }
+
+    #[test]
+    fn render_bar_full_percent() {
+        let bar = render_bar(100.0, "\x1b[32m");
+        assert_eq!(bar.matches('\u{2588}').count(), BAR_WIDTH);
+        assert!(!bar.contains('\u{2591}'));
+    }
+
+    #[test]
+    fn render_bar_clamps_negative() {
+        let bar = render_bar(-10.0, "\x1b[32m");
+        assert!(!bar.contains('\u{2588}'));
+        assert_eq!(bar.matches('\u{2591}').count(), BAR_WIDTH);
+    }
+
+    #[test]
+    fn render_bar_clamps_over_100() {
+        let bar = render_bar(150.0, "\x1b[32m");
+        assert_eq!(bar.matches('\u{2588}').count(), BAR_WIDTH);
+        assert!(!bar.contains('\u{2591}'));
+    }
+
+    #[test]
+    fn danger_color_green_for_low() {
+        assert_eq!(danger_color(0.0), "\x1b[32m");
+        assert_eq!(danger_color(50.0), "\x1b[32m");
+    }
+
+    #[test]
+    fn danger_color_yellow_for_medium() {
+        assert_eq!(danger_color(51.0), "\x1b[33m");
+        assert_eq!(danger_color(80.0), "\x1b[33m");
+    }
+
+    #[test]
+    fn danger_color_red_for_high() {
+        assert_eq!(danger_color(81.0), "\x1b[31m");
+        assert_eq!(danger_color(100.0), "\x1b[31m");
+    }
+
+    #[test]
+    fn format_reset_time_different_day() {
+        use chrono::TimeZone;
+        let far_future = Utc.with_ymd_and_hms(2099, 12, 31, 12, 0, 0).unwrap();
+        let result = format_reset_time(far_future);
+        assert!(result.contains("Dec 31"));
     }
 }
