@@ -215,11 +215,11 @@ fn load_tool_profiles() -> Vec<(Tool, Vec<String>, Option<String>)> {
         .collect()
 }
 
-fn get_codex_profiles(tool_profiles: &[(Tool, Vec<String>, Option<String>)]) -> Vec<String> {
+fn get_codex_profiles(tool_profiles: &[(Tool, Vec<String>, Option<String>)]) -> &[String] {
     tool_profiles
         .iter()
         .find(|(t, _, _)| *t == Tool::Codex)
-        .map(|(_, p, _)| p.clone())
+        .map(|(_, p, _)| p.as_slice())
         .unwrap_or_default()
 }
 
@@ -253,25 +253,7 @@ struct DashboardView<'a> {
     mode: &'a DashboardMode,
 }
 
-impl<'a> DashboardView<'a> {
-    fn new(
-        tool_profiles: &'a [(Tool, Vec<String>, Option<String>)],
-        usage_caches: &'a HashMap<Tool, UsageCache>,
-        pending_tools: &'a HashSet<Tool>,
-        selectable_items: &'a [(Tool, String)],
-        selected: usize,
-        mode: &'a DashboardMode,
-    ) -> Self {
-        Self {
-            tool_profiles,
-            usage_caches,
-            pending_tools,
-            selectable_items,
-            selected,
-            mode,
-        }
-    }
-
+impl DashboardView<'_> {
     fn build_lines(&self) -> Vec<String> {
         let mut lines = Vec::new();
 
@@ -441,14 +423,14 @@ fn render_dashboard(
     selected: usize,
     mode: &DashboardMode,
 ) -> Result<()> {
-    DashboardView::new(
+    DashboardView {
         tool_profiles,
         usage_caches,
         pending_tools,
         selectable_items,
         selected,
         mode,
-    )
+    }
     .render(term)
 }
 
@@ -471,7 +453,7 @@ async fn cmd_dashboard() -> Result<()> {
         selected = selected.min(selectable_items.len().saturating_sub(1));
 
         let claude_future = prefetch_claude_usage();
-        let codex_future = prefetch_codex_usage(&codex_profiles);
+        let codex_future = prefetch_codex_usage(codex_profiles);
         tokio::pin!(claude_future);
         tokio::pin!(codex_future);
 
@@ -596,14 +578,14 @@ mod tests {
         selected: usize,
         mode: &DashboardMode,
     ) -> Vec<String> {
-        DashboardView::new(
+        DashboardView {
             tool_profiles,
             usage_caches,
             pending_tools,
             selectable_items,
             selected,
             mode,
-        )
+        }
         .build_lines()
     }
 

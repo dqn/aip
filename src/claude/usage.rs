@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use serde_json::Value;
@@ -60,11 +60,8 @@ fn is_token_expired(oauth: &OAuthData) -> bool {
     match oauth.expires_at {
         // 5 minute buffer
         Some(expires_at) => {
-            let now_ms = Utc::now().timestamp_millis();
-            if now_ms < 0 {
-                return true;
-            }
-            (now_ms as u64).saturating_add(300_000) >= expires_at
+            let now_ms = Utc::now().timestamp_millis().max(0) as u64;
+            now_ms.saturating_add(300_000) >= expires_at
         }
         None => false,
     }
@@ -183,7 +180,7 @@ async fn get_access_token_from_credentials(path: &Path) -> Result<(String, Profi
     // Token expired, refresh and update credentials.json
     let token_resp = refresh_token(&oauth)
         .await
-        .map_err(|_| anyhow!("Refresh token expired (switch to this profile to re-auth)"))?;
+        .context("Refresh token expired (switch to this profile to re-auth)")?;
     let access_token = token_resp.access_token.clone();
     apply_token_response(&mut raw, &token_resp)?;
     fs_util::atomic_write(path, &serde_json::to_string_pretty(&raw)?)?;
