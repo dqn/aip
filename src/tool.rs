@@ -84,9 +84,8 @@ impl Tool {
         let mut profiles = Vec::new();
         for entry in std::fs::read_dir(&profiles_dir)? {
             let entry = entry?;
-            let name = match entry.file_name().into_string() {
-                Ok(n) => n,
-                Err(_) => continue,
+            let Ok(name) = entry.file_name().into_string() else {
+                continue;
             };
             if name == "_current" {
                 continue;

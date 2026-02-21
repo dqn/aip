@@ -483,8 +483,10 @@ async fn cmd_dashboard() -> Result<()> {
         tokio::pin!(codex_future);
 
         let mut pending_tools: HashSet<Tool> = HashSet::from([Tool::Claude, Tool::Codex]);
-        let mut claude_done = false;
-        let mut codex_done = false;
+
+        // Refresh timer starts after all fetches complete.
+        let refresh_sleep = tokio::time::sleep(Duration::from_secs(86400));
+        tokio::pin!(refresh_sleep);
 
         render_dashboard(
             &term,
@@ -498,91 +500,40 @@ async fn cmd_dashboard() -> Result<()> {
 
         let mut needs_reload = false;
 
-        // Phase 1: Wait for fetches + handle keys
-        while !(claude_done && codex_done) {
-            tokio::select! {
-                cache = &mut claude_future, if !claude_done => {
-                    usage_caches.insert(Tool::Claude, cache);
-                    pending_tools.remove(&Tool::Claude);
-                    claude_done = true;
-                    render_dashboard(
-                        &term,
-                        &tool_profiles,
-                        &usage_caches,
-                        &pending_tools,
-                        &selectable_items,
-                        selected,
-                        &mode,
-                    )?;
-                }
-                cache = &mut codex_future, if !codex_done => {
-                    usage_caches.insert(Tool::Codex, cache);
-                    pending_tools.remove(&Tool::Codex);
-                    codex_done = true;
-                    render_dashboard(
-                        &term,
-                        &tool_profiles,
-                        &usage_caches,
-                        &pending_tools,
-                        &selectable_items,
-                        selected,
-                        &mode,
-                    )?;
-                }
-                Some(key_result) = key_rx.recv() => {
-                    let key = match key_result {
-                        Ok(k) => k,
-                        Err(_) => continue,
-                    };
-                    match handle_dashboard_key(
-                        key,
-                        &mut selected,
-                        &mut mode,
-                        &selectable_items,
-                        &tool_profiles,
-                    ) {
-                        DashboardAction::Quit => {
-                            return Ok(());
-                        }
-                        DashboardAction::Reload => {
-                            needs_reload = true;
-                            break;
-                        }
-                        DashboardAction::Render => {
-                            render_dashboard(
-                                &term,
-                                &tool_profiles,
-                                &usage_caches,
-                                &pending_tools,
-                                &selectable_items,
-                                selected,
-                                &mode,
-                            )?;
-                        }
-                        DashboardAction::None => {}
-                    }
-                }
-            }
-        }
-
-        if needs_reload {
-            continue;
-        }
-
-        // Phase 2: All data fetched — render final "Updated" state
-        render_dashboard(
-            &term,
-            &tool_profiles,
-            &usage_caches,
-            &pending_tools,
-            &selectable_items,
-            selected,
-            &mode,
-        )?;
-
-        // Phase 3: Wait for refresh interval or user interaction
         loop {
             tokio::select! {
+                cache = &mut claude_future, if pending_tools.contains(&Tool::Claude) => {
+                    usage_caches.insert(Tool::Claude, cache);
+                    pending_tools.remove(&Tool::Claude);
+                    if pending_tools.is_empty() {
+                        refresh_sleep.as_mut().reset(tokio::time::Instant::now() + USAGE_REFRESH_INTERVAL);
+                    }
+                    render_dashboard(
+                        &term,
+                        &tool_profiles,
+                        &usage_caches,
+                        &pending_tools,
+                        &selectable_items,
+                        selected,
+                        &mode,
+                    )?;
+                }
+                cache = &mut codex_future, if pending_tools.contains(&Tool::Codex) => {
+                    usage_caches.insert(Tool::Codex, cache);
+                    pending_tools.remove(&Tool::Codex);
+                    if pending_tools.is_empty() {
+                        refresh_sleep.as_mut().reset(tokio::time::Instant::now() + USAGE_REFRESH_INTERVAL);
+                    }
+                    render_dashboard(
+                        &term,
+                        &tool_profiles,
+                        &usage_caches,
+                        &pending_tools,
+                        &selectable_items,
+                        selected,
+                        &mode,
+                    )?;
+                }
                 Some(key_result) = key_rx.recv() => {
                     let key = match key_result {
                         Ok(k) => k,
@@ -595,9 +546,7 @@ async fn cmd_dashboard() -> Result<()> {
                         &selectable_items,
                         &tool_profiles,
                     ) {
-                        DashboardAction::Quit => {
-                            return Ok(());
-                        }
+                        DashboardAction::Quit => return Ok(()),
                         DashboardAction::Reload => {
                             needs_reload = true;
                             break;
@@ -616,7 +565,7 @@ async fn cmd_dashboard() -> Result<()> {
                         DashboardAction::None => {}
                     }
                 }
-                _ = tokio::time::sleep(USAGE_REFRESH_INTERVAL) => {
+                _ = &mut refresh_sleep, if pending_tools.is_empty() => {
                     break;
                 }
             }

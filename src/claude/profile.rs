@@ -48,13 +48,10 @@ fn sync_keychain_to_current_profile() {
     };
 
     // Compare organizationName to detect account mismatch
-    let stored_value: serde_json::Value = match fs::read_to_string(&creds_path)
+    let stored_value: serde_json::Value = fs::read_to_string(&creds_path)
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
-    {
-        Some(v) => v,
-        None => serde_json::Value::Null,
-    };
+        .unwrap_or(serde_json::Value::Null);
 
     let keychain_org = keychain_value
         .get("claudeAiOauth")
