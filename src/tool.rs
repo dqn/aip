@@ -38,6 +38,9 @@ impl Tool {
         if trimmed.is_empty() {
             return Ok(None);
         }
+        if self.profile_dir(trimmed).is_err() {
+            return Ok(None);
+        }
         Ok(Some(trimmed.to_string()))
     }
 

@@ -24,7 +24,14 @@ pub fn switch(profile: &str) -> Result<()> {
         keychain::write(&value)?;
     }
 
-    fs::write(TOOL.current_file()?, format!("{}\n", profile))?;
+    // Atomic write for _current
+    let current_file = TOOL.current_file()?;
+    let tmp = current_file.with_extension("tmp");
+    fs::write(&tmp, format!("{}\n", profile))?;
+    if let Err(e) = fs::rename(&tmp, &current_file) {
+        let _ = fs::remove_file(&tmp);
+        return Err(e.into());
+    }
     Ok(())
 }
 

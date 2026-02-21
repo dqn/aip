@@ -29,8 +29,8 @@ pub struct RateWindow {
 }
 
 impl RateWindow {
-    pub fn resets_at_utc(&self) -> DateTime<Utc> {
-        DateTime::from_timestamp(self.resets_at, 0).unwrap_or_default()
+    pub fn resets_at_utc(&self) -> Option<DateTime<Utc>> {
+        DateTime::from_timestamp(self.resets_at, 0)
     }
 }
 
@@ -157,7 +157,10 @@ async fn fetch_from_auth_path(path: &Path) -> Result<Option<RateLimits>> {
 
     let tmp = path.with_extension("tmp");
     std::fs::write(&tmp, serde_json::to_string_pretty(&raw)?)?;
-    std::fs::rename(&tmp, path)?;
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e.into());
+    }
 
     let new_tokens = read_tokens(&raw)?;
     let resp = fetch_usage_api(&new_tokens).await?;

@@ -140,7 +140,7 @@ fn codex_usage_lines(result: Result<Option<RateLimits>>) -> Vec<String> {
                 lines.push(format_usage_line(
                     "5-hour",
                     primary.used_percent,
-                    Some(primary.resets_at_utc()),
+                    primary.resets_at_utc(),
                     &DisplayMode::Left,
                 ));
             }
@@ -148,7 +148,7 @@ fn codex_usage_lines(result: Result<Option<RateLimits>>) -> Vec<String> {
                 lines.push(format_usage_line(
                     "Weekly",
                     secondary.used_percent,
-                    Some(secondary.resets_at_utc()),
+                    secondary.resets_at_utc(),
                     &DisplayMode::Left,
                 ));
             }

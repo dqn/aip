@@ -15,14 +15,25 @@ pub fn switch(profile: &str) -> Result<()> {
     // Save active auth.json to current profile
     sync_auth_to_current_profile();
 
-    // Update _current file
-    fs::write(TOOL.current_file()?, format!("{}\n", profile))?;
-
-    // Load new profile's auth.json to root
+    // Load new profile's auth.json to root (atomic write before updating _current)
     let src = profile_dir.join("auth.json");
     if src.exists() {
         let dest = TOOL.home_dir()?.join("auth.json");
-        fs::copy(&src, &dest)?;
+        let tmp = dest.with_extension("tmp");
+        fs::copy(&src, &tmp)?;
+        if let Err(e) = fs::rename(&tmp, &dest) {
+            let _ = fs::remove_file(&tmp);
+            return Err(e.into());
+        }
+    }
+
+    // Update _current file (atomic write)
+    let current_file = TOOL.current_file()?;
+    let tmp = current_file.with_extension("tmp");
+    fs::write(&tmp, format!("{}\n", profile))?;
+    if let Err(e) = fs::rename(&tmp, &current_file) {
+        let _ = fs::remove_file(&tmp);
+        return Err(e.into());
     }
 
     Ok(())
