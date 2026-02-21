@@ -310,7 +310,9 @@ fn build_dashboard_lines(
 
     match mode {
         DashboardMode::Normal => {
-            lines.push("[↑↓] Navigate  [Enter/Space] Switch  [BS/Del] Delete  [ESC/q] Quit".to_string());
+            lines.push(
+                "[↑↓] Navigate  [Enter/Space] Switch  [BS/Del] Delete  [ESC/q] Quit".to_string(),
+            );
         }
         DashboardMode::DeleteConfirm(idx) => {
             if let Some((tool, profile)) = selectable_items.get(*idx) {
