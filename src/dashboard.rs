@@ -284,7 +284,7 @@ impl DashboardView<'_> {
         match self.mode {
             DashboardMode::Normal => {
                 lines.push(
-                    "[↑↓] Navigate  [Enter/Space] Switch  [BS/Del] Delete  [ESC/q] Quit"
+                    "[↑↓] Navigate  [J/K] Reorder  [Enter/Space] Switch  [BS/Del] Delete  [ESC/q] Quit"
                         .to_string(),
                 );
             }
@@ -308,6 +308,60 @@ impl DashboardView<'_> {
         term.write_str("\x1b[J")?;
 
         Ok(())
+    }
+}
+
+fn tool_item_range(tool: Tool, selectable_items: &[(Tool, String)]) -> std::ops::Range<usize> {
+    let start = selectable_items
+        .iter()
+        .position(|(t, _)| *t == tool)
+        .unwrap_or(0);
+    let end = selectable_items
+        .iter()
+        .rposition(|(t, _)| *t == tool)
+        .map(|i| i + 1)
+        .unwrap_or(start);
+    start..end
+}
+
+fn tool_profiles_for(
+    tool: Tool,
+    tool_profiles: &[(Tool, Vec<String>, Option<String>)],
+) -> Vec<String> {
+    tool_profiles
+        .iter()
+        .find(|(t, _, _)| *t == tool)
+        .map(|(_, profiles, _)| profiles.clone())
+        .unwrap_or_default()
+}
+
+fn handle_move(
+    selected: usize,
+    selectable_items: &[(Tool, String)],
+    tool_profiles: &[(Tool, Vec<String>, Option<String>)],
+    direction: i32, // -1 for up, 1 for down
+) -> DashboardAction {
+    let (tool, _) = &selectable_items[selected];
+    let range = tool_item_range(*tool, selectable_items);
+
+    // No-op if single profile or at boundary
+    if range.len() <= 1 {
+        return DashboardAction::None;
+    }
+    let target = selected as i32 + direction;
+    if target < range.start as i32 || target >= range.end as i32 {
+        return DashboardAction::None;
+    }
+
+    let mut profiles = tool_profiles_for(*tool, tool_profiles);
+    let local_idx = selected - range.start;
+    let target_local = target as usize - range.start;
+    profiles.swap(local_idx, target_local);
+
+    if tool.save_profile_order(&profiles).is_ok() {
+        DashboardAction::Reload
+    } else {
+        DashboardAction::None
     }
 }
 
@@ -363,6 +417,8 @@ fn handle_dashboard_key(
                 *mode = DashboardMode::DeleteConfirm(*selected);
                 DashboardAction::Render
             }
+            Key::Char('K') => handle_move(*selected, selectable_items, tool_profiles, -1),
+            Key::Char('J') => handle_move(*selected, selectable_items, tool_profiles, 1),
             Key::Escape | Key::Char('q') => DashboardAction::Quit,
             _ => DashboardAction::None,
         },
@@ -841,6 +897,7 @@ mod tests {
 
         let footer = lines.last().unwrap();
         assert!(footer.contains("Navigate"));
+        assert!(footer.contains("Reorder"));
         assert!(footer.contains("Switch"));
         assert!(footer.contains("Delete"));
         assert!(footer.contains("Quit"));
@@ -1051,6 +1108,50 @@ mod tests {
         );
         assert!(matches!(action, DashboardAction::Render));
         assert!(matches!(mode, DashboardMode::Normal));
+    }
+
+    #[test]
+    fn tool_item_range_returns_correct_range() {
+        let tool_profiles = sample_tool_profiles();
+        let items = build_selectable_items(&tool_profiles);
+
+        let claude_range = tool_item_range(Tool::Claude, &items);
+        assert_eq!(claude_range, 0..2);
+
+        let codex_range = tool_item_range(Tool::Codex, &items);
+        assert_eq!(codex_range, 2..3);
+    }
+
+    #[test]
+    fn tool_item_range_returns_empty_for_missing_tool() {
+        let tool_profiles = vec![(
+            Tool::Claude,
+            vec!["personal".to_string()],
+            Some("personal".to_string()),
+        )];
+        let items = build_selectable_items(&tool_profiles);
+
+        let codex_range = tool_item_range(Tool::Codex, &items);
+        assert_eq!(codex_range.len(), 0);
+    }
+
+    #[test]
+    fn tool_profiles_for_returns_profiles() {
+        let tool_profiles = sample_tool_profiles();
+
+        let claude_profiles = tool_profiles_for(Tool::Claude, &tool_profiles);
+        assert_eq!(claude_profiles, vec!["personal", "work"]);
+
+        let codex_profiles = tool_profiles_for(Tool::Codex, &tool_profiles);
+        assert_eq!(codex_profiles, vec!["dev"]);
+    }
+
+    #[test]
+    fn tool_profiles_for_returns_empty_for_missing_tool() {
+        let tool_profiles = vec![(Tool::Claude, vec!["a".to_string()], None)];
+
+        let codex_profiles = tool_profiles_for(Tool::Codex, &tool_profiles);
+        assert!(codex_profiles.is_empty());
     }
 
     #[test]

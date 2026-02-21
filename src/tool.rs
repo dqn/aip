@@ -1,7 +1,10 @@
+use std::collections::HashSet;
 use std::fmt;
 use std::path::PathBuf;
 
 use anyhow::{Result, anyhow};
+
+use crate::fs_util;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Tool {
@@ -55,8 +58,8 @@ impl Tool {
                 name
             ));
         }
-        if name == "_current" {
-            return Err(anyhow!("'_current' is a reserved name"));
+        if name == "_current" || name == "_order" {
+            return Err(anyhow!("'{}' is a reserved name", name));
         }
         Ok(self.profiles_dir()?.join(name))
     }
@@ -76,27 +79,63 @@ impl Tool {
         Ok(())
     }
 
+    pub fn order_file(&self) -> Result<PathBuf> {
+        Ok(self.profiles_dir()?.join("_order"))
+    }
+
+    pub fn save_profile_order(&self, profiles: &[String]) -> Result<()> {
+        let content = profiles.join("\n") + "\n";
+        fs_util::atomic_write(&self.order_file()?, &content)
+    }
+
     pub fn list_profiles(&self) -> Result<Vec<String>> {
         let profiles_dir = self.profiles_dir()?;
         if !profiles_dir.exists() {
             return Ok(vec![]);
         }
-        let mut profiles = Vec::new();
+        let mut existing = HashSet::new();
         for entry in std::fs::read_dir(&profiles_dir)? {
             let entry = entry?;
             let Ok(name) = entry.file_name().into_string() else {
                 continue;
             };
-            if name == "_current" {
+            if name == "_current" || name == "_order" {
                 continue;
             }
             if entry.file_type()?.is_dir() {
-                profiles.push(name);
+                existing.insert(name);
             }
         }
-        profiles.sort();
-        Ok(profiles)
+
+        let order_content = std::fs::read_to_string(self.order_file()?).ok();
+        Ok(merge_profiles_with_order(
+            existing,
+            order_content.as_deref(),
+        ))
     }
+}
+
+fn merge_profiles_with_order(
+    existing: HashSet<String>,
+    order_content: Option<&str>,
+) -> Vec<String> {
+    let mut remaining = existing;
+    let mut result = Vec::new();
+
+    if let Some(content) = order_content {
+        for line in content.lines() {
+            let name = line.trim();
+            if !name.is_empty() && remaining.remove(name) {
+                result.push(name.to_string());
+            }
+        }
+    }
+
+    let mut rest: Vec<String> = remaining.into_iter().collect();
+    rest.sort();
+    result.extend(rest);
+
+    result
 }
 
 impl fmt::Display for Tool {
@@ -141,9 +180,11 @@ mod tests {
     }
 
     #[test]
-    fn profile_dir_rejects_reserved_current_name() {
+    fn profile_dir_rejects_reserved_names() {
         assert!(Tool::Claude.profile_dir("_current").is_err());
         assert!(Tool::Codex.profile_dir("_current").is_err());
+        assert!(Tool::Claude.profile_dir("_order").is_err());
+        assert!(Tool::Codex.profile_dir("_order").is_err());
     }
 
     #[test]
@@ -151,5 +192,45 @@ mod tests {
         assert!(Tool::Claude.profile_dir("personal").is_ok());
         assert!(Tool::Claude.profile_dir("work-account").is_ok());
         assert!(Tool::Claude.profile_dir("test_123").is_ok());
+    }
+
+    #[test]
+    fn merge_profiles_with_order_no_order_file() {
+        let existing = HashSet::from(["c".to_string(), "a".to_string(), "b".to_string()]);
+        let result = merge_profiles_with_order(existing, None);
+        assert_eq!(result, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn merge_profiles_with_order_respects_order() {
+        let existing = HashSet::from(["a".to_string(), "b".to_string(), "c".to_string()]);
+        let result = merge_profiles_with_order(existing, Some("c\nb\na\n"));
+        assert_eq!(result, vec!["c", "b", "a"]);
+    }
+
+    #[test]
+    fn merge_profiles_with_order_appends_new_profiles_alphabetically() {
+        let existing = HashSet::from([
+            "a".to_string(),
+            "b".to_string(),
+            "c".to_string(),
+            "d".to_string(),
+        ]);
+        let result = merge_profiles_with_order(existing, Some("c\na\n"));
+        assert_eq!(result, vec!["c", "a", "b", "d"]);
+    }
+
+    #[test]
+    fn merge_profiles_with_order_ignores_deleted_profiles() {
+        let existing = HashSet::from(["a".to_string(), "c".to_string()]);
+        let result = merge_profiles_with_order(existing, Some("c\nb\na\n"));
+        assert_eq!(result, vec!["c", "a"]);
+    }
+
+    #[test]
+    fn merge_profiles_with_order_handles_empty_lines() {
+        let existing = HashSet::from(["a".to_string(), "b".to_string()]);
+        let result = merge_profiles_with_order(existing, Some("\n  \nb\n\na\n"));
+        assert_eq!(result, vec!["b", "a"]);
     }
 }
