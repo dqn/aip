@@ -305,7 +305,7 @@ fn build_dashboard_lines(
 
     match mode {
         DashboardMode::Normal => {
-            lines.push("[↑↓] Navigate  [Enter] Switch  [BS/Del] Delete  [ESC/q] Quit".to_string());
+            lines.push("[↑↓] Navigate  [Enter/Space] Switch  [BS/Del] Delete  [ESC/q] Quit".to_string());
         }
         DashboardMode::DeleteConfirm(idx) => {
             if let Some((tool, profile)) = selectable_items.get(*idx) {
@@ -372,7 +372,7 @@ fn handle_dashboard_key(
                 }
                 DashboardAction::Render
             }
-            Key::Enter => {
+            Key::Enter | Key::Char(' ') => {
                 let (tool, profile) = &selectable_items[*selected];
                 if is_current_profile(tool_profiles, *tool, profile) {
                     return DashboardAction::None;
