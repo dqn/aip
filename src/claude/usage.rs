@@ -20,8 +20,6 @@ struct OAuthData {
     refresh_token: Option<String>,
     #[serde(rename = "expiresAt")]
     expires_at: Option<u64>,
-    #[serde(rename = "organizationName")]
-    organization_name: Option<String>,
     #[serde(rename = "planType")]
     plan_type: Option<String>,
 }
@@ -46,8 +44,6 @@ pub struct UsageWindow {
 }
 
 pub struct ProfileInfo {
-    #[allow(dead_code)]
-    pub organization_name: Option<String>,
     pub plan_type: Option<String>,
 }
 
@@ -62,8 +58,11 @@ fn is_token_expired(oauth: &OAuthData) -> bool {
     match oauth.expires_at {
         // 5 minute buffer
         Some(expires_at) => {
-            let now_ms = Utc::now().timestamp_millis() as u64;
-            now_ms + 300_000 >= expires_at
+            let now_ms = Utc::now().timestamp_millis();
+            if now_ms < 0 {
+                return true;
+            }
+            now_ms as u64 + 300_000 >= expires_at
         }
         None => false,
     }
@@ -75,8 +74,7 @@ async fn refresh_token(oauth: &OAuthData) -> Result<TokenResponse> {
         .as_ref()
         .ok_or_else(|| anyhow!("no refresh token available"))?;
 
-    let client = reqwest::Client::new();
-    let resp = client
+    let resp = shared_client()
         .post(TOKEN_URL)
         .form(&[
             ("grant_type", "refresh_token"),
@@ -104,7 +102,8 @@ fn apply_token_response(raw: &mut Value, token_resp: &TokenResponse) {
             oauth["refreshToken"] = Value::String(new_refresh.clone());
         }
         let expires_in = token_resp.expires_in.unwrap_or(3600);
-        let new_expires_at = Utc::now().timestamp_millis() as u64 + expires_in * 1000;
+        let now_ms = Utc::now().timestamp_millis().max(0) as u64;
+        let new_expires_at = now_ms + expires_in.saturating_mul(1000);
         oauth["expiresAt"] = Value::Number(new_expires_at.into());
     }
 }
@@ -114,7 +113,6 @@ async fn get_access_token() -> Result<(String, ProfileInfo)> {
     let oauth = read_oauth(&raw)?;
 
     let info = ProfileInfo {
-        organization_name: oauth.organization_name.clone(),
         plan_type: oauth.plan_type.clone(),
     };
 
@@ -131,6 +129,11 @@ async fn get_access_token() -> Result<(String, ProfileInfo)> {
     Ok((access_token, info))
 }
 
+fn shared_client() -> &'static reqwest::Client {
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    CLIENT.get_or_init(reqwest::Client::new)
+}
+
 pub async fn fetch_usage() -> Result<(UsageResponse, ProfileInfo)> {
     let (token, info) = get_access_token().await?;
     let usage = fetch_usage_with_token(&token).await?;
@@ -138,8 +141,7 @@ pub async fn fetch_usage() -> Result<(UsageResponse, ProfileInfo)> {
 }
 
 pub async fn fetch_usage_with_token(token: &str) -> Result<UsageResponse> {
-    let client = reqwest::Client::new();
-    let resp = client
+    let resp = shared_client()
         .get("https://api.anthropic.com/api/oauth/usage")
         .header("Authorization", format!("Bearer {}", token))
         .header("anthropic-beta", "oauth-2025-04-20")
@@ -163,7 +165,6 @@ async fn get_access_token_from_credentials(path: &Path) -> Result<(String, Profi
     let oauth = read_oauth(&raw)?;
 
     let info = ProfileInfo {
-        organization_name: oauth.organization_name.clone(),
         plan_type: oauth.plan_type.clone(),
     };
 

@@ -65,9 +65,13 @@ fn read_auth(path: &Path) -> Result<(Value, TokenData)> {
     Ok((raw, tokens))
 }
 
+fn shared_client() -> &'static reqwest::Client {
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    CLIENT.get_or_init(reqwest::Client::new)
+}
+
 async fn do_refresh_token(refresh_token: &str) -> Result<RefreshResponse> {
-    let client = reqwest::Client::new();
-    let resp = client
+    let resp = shared_client()
         .post(TOKEN_URL)
         .json(&serde_json::json!({
             "client_id": CLIENT_ID,
@@ -104,8 +108,7 @@ fn apply_refresh(raw: &mut Value, resp: &RefreshResponse) {
 }
 
 async fn fetch_usage_api(tokens: &TokenData) -> Result<reqwest::Response> {
-    let client = reqwest::Client::new();
-    let mut req = client
+    let mut req = shared_client()
         .get(USAGE_URL)
         .header("Authorization", format!("Bearer {}", tokens.access_token));
 
@@ -133,8 +136,9 @@ async fn fetch_from_auth_path(path: &Path) -> Result<Option<RateLimits>> {
 
     let resp = fetch_usage_api(&tokens).await?;
 
-    if resp.status() != reqwest::StatusCode::UNAUTHORIZED {
-        return parse_usage_response(resp).await;
+    match resp.status() {
+        reqwest::StatusCode::UNAUTHORIZED => {}
+        _ => return parse_usage_response(resp).await,
     }
 
     // Token expired, try refreshing

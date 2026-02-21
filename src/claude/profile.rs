@@ -79,7 +79,12 @@ fn sync_keychain_to_current_profile() {
         Ok(j) => j,
         _ => return,
     };
-    let _ = fs::write(&creds_path, json);
+    if let Err(e) = fs::write(&creds_path, json) {
+        eprintln!(
+            "Warning: failed to sync credentials to profile '{}': {}",
+            current, e
+        );
+    }
 }
 
 pub fn save(name: &str) -> Result<()> {

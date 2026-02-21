@@ -507,7 +507,10 @@ async fn cmd_dashboard() -> Result<()> {
                     )?;
                 }
                 Some(key_result) = key_rx.recv() => {
-                    let key = key_result?;
+                    let key = match key_result {
+                        Ok(k) => k,
+                        Err(_) => continue,
+                    };
                     match handle_dashboard_key(
                         key,
                         &mut selected,
@@ -555,7 +558,10 @@ async fn cmd_dashboard() -> Result<()> {
         loop {
             tokio::select! {
                 Some(key_result) = key_rx.recv() => {
-                    let key = key_result?;
+                    let key = match key_result {
+                        Ok(k) => k,
+                        Err(_) => continue,
+                    };
                     match handle_dashboard_key(
                         key,
                         &mut selected,
