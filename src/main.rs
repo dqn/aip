@@ -414,10 +414,7 @@ fn handle_dashboard_key(
             match key {
                 Key::Char('y') => {
                     let (tool, profile) = &selectable_items[idx];
-                    let result = match tool {
-                        Tool::Claude => claude::profile::delete(profile),
-                        Tool::Codex => codex::profile::delete(profile),
-                    };
+                    let result = tool.delete_profile(profile);
                     *mode = DashboardMode::Normal;
                     if result.is_ok() {
                         DashboardAction::Reload
@@ -471,11 +468,7 @@ async fn cmd_dashboard() -> Result<()> {
         let codex_profiles = get_codex_profiles(&tool_profiles);
         let selectable_items = build_selectable_items(&tool_profiles);
 
-        if !selectable_items.is_empty() {
-            selected = selected.min(selectable_items.len() - 1);
-        } else {
-            selected = 0;
-        }
+        selected = selected.min(selectable_items.len().saturating_sub(1));
 
         let claude_future = prefetch_claude_usage();
         let codex_future = prefetch_codex_usage(&codex_profiles);
@@ -498,9 +491,9 @@ async fn cmd_dashboard() -> Result<()> {
             &mode,
         )?;
 
-        let mut needs_reload = false;
-
         loop {
+            let mut should_render = false;
+
             tokio::select! {
                 cache = &mut claude_future, if pending_tools.contains(&Tool::Claude) => {
                     usage_caches.insert(Tool::Claude, cache);
@@ -508,15 +501,7 @@ async fn cmd_dashboard() -> Result<()> {
                     if pending_tools.is_empty() {
                         refresh_sleep.as_mut().reset(tokio::time::Instant::now() + USAGE_REFRESH_INTERVAL);
                     }
-                    render_dashboard(
-                        &term,
-                        &tool_profiles,
-                        &usage_caches,
-                        &pending_tools,
-                        &selectable_items,
-                        selected,
-                        &mode,
-                    )?;
+                    should_render = true;
                 }
                 cache = &mut codex_future, if pending_tools.contains(&Tool::Codex) => {
                     usage_caches.insert(Tool::Codex, cache);
@@ -524,15 +509,7 @@ async fn cmd_dashboard() -> Result<()> {
                     if pending_tools.is_empty() {
                         refresh_sleep.as_mut().reset(tokio::time::Instant::now() + USAGE_REFRESH_INTERVAL);
                     }
-                    render_dashboard(
-                        &term,
-                        &tool_profiles,
-                        &usage_caches,
-                        &pending_tools,
-                        &selectable_items,
-                        selected,
-                        &mode,
-                    )?;
+                    should_render = true;
                 }
                 Some(key_result) = key_rx.recv() => {
                     let key = match key_result {
@@ -547,21 +524,8 @@ async fn cmd_dashboard() -> Result<()> {
                         &tool_profiles,
                     ) {
                         DashboardAction::Quit => return Ok(()),
-                        DashboardAction::Reload => {
-                            needs_reload = true;
-                            break;
-                        }
-                        DashboardAction::Render => {
-                            render_dashboard(
-                                &term,
-                                &tool_profiles,
-                                &usage_caches,
-                                &pending_tools,
-                                &selectable_items,
-                                selected,
-                                &mode,
-                            )?;
-                        }
+                        DashboardAction::Reload => break,
+                        DashboardAction::Render => should_render = true,
                         DashboardAction::None => {}
                     }
                 }
@@ -569,10 +533,18 @@ async fn cmd_dashboard() -> Result<()> {
                     break;
                 }
             }
-        }
 
-        if needs_reload {
-            continue;
+            if should_render {
+                render_dashboard(
+                    &term,
+                    &tool_profiles,
+                    &usage_caches,
+                    &pending_tools,
+                    &selectable_items,
+                    selected,
+                    &mode,
+                )?;
+            }
         }
     }
 }

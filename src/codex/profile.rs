@@ -108,8 +108,3 @@ pub fn save(name: &str) -> Result<()> {
     fs::set_permissions(&dest_path, fs::Permissions::from_mode(0o600))?;
     Ok(())
 }
-
-#[allow(dead_code)]
-pub fn delete(name: &str) -> Result<()> {
-    TOOL.delete_profile(name)
-}
