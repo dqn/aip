@@ -109,6 +109,7 @@ pub fn save(name: &str) -> Result<()> {
     Ok(())
 }
 
+#[allow(dead_code)]
 pub fn delete(name: &str) -> Result<()> {
     TOOL.delete_profile(name)
 }
