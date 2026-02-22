@@ -156,6 +156,11 @@ async fn get_access_token_from_credentials(path: &Path) -> Result<(String, Profi
 }
 
 pub async fn fetch_all_profiles_usage() -> HashMap<String, Result<(UsageResponse, ProfileInfo)>> {
+    // Sync Keychain credentials to current profile before fetching usage.
+    // Claude Code updates the Keychain directly when refreshing tokens,
+    // so the profile's credentials.json may be stale.
+    super::profile::sync_keychain_to_current_profile();
+
     let profiles = match Tool::Claude.list_profiles() {
         Ok(p) => p,
         Err(_) => return HashMap::new(),
