@@ -2,7 +2,6 @@ use chrono::{DateTime, Local, Utc};
 
 const BAR_WIDTH: usize = 20;
 const RESET: &str = "\x1b[0m";
-const CYAN: &str = "\x1b[36m";
 
 fn danger_color(used_percent: f64) -> &'static str {
     if used_percent > 80.0 {
@@ -44,7 +43,7 @@ pub fn format_usage_line(
     let color = danger_color(percent);
     let (display_percent, colored_mode_label) = match mode {
         DisplayMode::Used => (percent, format!("{color}used{RESET}")),
-        DisplayMode::Left => (100.0 - percent, format!("{CYAN}left{RESET}")),
+        DisplayMode::Left => (100.0 - percent, format!("{color}left{RESET}")),
     };
     let reset_label = match resets_at {
         Some(reset_at) => format!("resets at {}", format_reset_time(reset_at)),
