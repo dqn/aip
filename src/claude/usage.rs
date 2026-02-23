@@ -131,7 +131,10 @@ pub async fn fetch_usage_with_token(token: &str) -> Result<UsageResponse> {
     Ok(resp.json().await?)
 }
 
-async fn get_access_token_from_credentials(path: &Path) -> Result<(String, ProfileInfo)> {
+async fn get_access_token_from_credentials(
+    path: &Path,
+    is_current: bool,
+) -> Result<(String, ProfileInfo)> {
     let content = std::fs::read_to_string(path)?;
     let mut raw: Value = serde_json::from_str(&content)?;
     let oauth = read_oauth(&raw)?;
@@ -144,7 +147,14 @@ async fn get_access_token_from_credentials(path: &Path) -> Result<(String, Profi
         return Ok((oauth.access_token, info));
     }
 
-    // Token expired, refresh and update credentials.json
+    // For the current profile, don't refresh — Claude Code manages its token
+    // via Keychain and refreshing here would invalidate Claude Code's token.
+    if is_current {
+        return Err(anyhow!("Access token expired (run Claude Code to refresh)"));
+    }
+
+    // For non-current profiles, it's safe to refresh since Claude Code
+    // doesn't use them.
     let token_resp = refresh_token(&oauth)
         .await
         .context("Refresh token expired (switch to this profile to re-auth)")?;
@@ -161,6 +171,8 @@ pub async fn fetch_all_profiles_usage() -> HashMap<String, Result<(UsageResponse
     // so the profile's credentials.json may be stale.
     super::profile::sync_keychain_to_current_profile();
 
+    let current_profile = Tool::Claude.current_profile().ok().flatten();
+
     let profiles = match Tool::Claude.list_profiles() {
         Ok(p) => p,
         Err(_) => return HashMap::new(),
@@ -169,11 +181,13 @@ pub async fn fetch_all_profiles_usage() -> HashMap<String, Result<(UsageResponse
     let mut handles = Vec::new();
 
     for profile in profiles {
+        let is_current = current_profile.as_deref() == Some(profile.as_str());
         handles.push(tokio::spawn(async move {
             let result = async {
                 let dir = Tool::Claude.profile_dir(&profile)?;
                 let creds_path = dir.join("credentials.json");
-                let (token, info) = get_access_token_from_credentials(&creds_path).await?;
+                let (token, info) =
+                    get_access_token_from_credentials(&creds_path, is_current).await?;
                 let usage = fetch_usage_with_token(&token).await?;
                 Ok((usage, info))
             }
