@@ -30,6 +30,7 @@ enum DashboardAction {
     None,
     Render,
     Reload,
+    Switch(Tool, String),
     Quit,
 }
 
@@ -404,11 +405,7 @@ fn handle_dashboard_key(
                 if is_current_profile(tool_profiles, *tool, profile) {
                     return DashboardAction::None;
                 }
-                if switch_profile(*tool, profile).is_ok() {
-                    DashboardAction::Reload
-                } else {
-                    DashboardAction::None
-                }
+                DashboardAction::Switch(*tool, profile.clone())
             }
             Key::Backspace | Key::Del => {
                 let (tool, profile) = &selectable_items[*selected];
@@ -539,6 +536,18 @@ pub async fn cmd_dashboard() -> Result<()> {
                     ) {
                         DashboardAction::Quit => return Ok(()),
                         DashboardAction::Reload => break,
+                        DashboardAction::Switch(tool, ref profile) => {
+                            if tool == Tool::Claude
+                                && let Ok(dir) = Tool::Claude.profile_dir(profile) {
+                                    let _ = claude::usage::refresh_credentials_if_expired(
+                                        &dir.join("credentials.json"),
+                                    )
+                                    .await;
+                                }
+                            if switch_profile(tool, profile).is_ok() {
+                                break;
+                            }
+                        }
                         DashboardAction::Render => should_render = true,
                         DashboardAction::None => {}
                     }

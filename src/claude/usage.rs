@@ -165,6 +165,22 @@ async fn get_access_token_from_credentials(
     Ok((access_token, info))
 }
 
+pub async fn refresh_credentials_if_expired(path: &Path) -> Result<String> {
+    let content = std::fs::read_to_string(path)?;
+    let mut raw: Value = serde_json::from_str(&content)?;
+    let oauth = read_oauth(&raw)?;
+
+    if !is_token_expired(&oauth) {
+        return Ok(content);
+    }
+
+    let token_resp = refresh_token(&oauth).await?;
+    apply_token_response(&mut raw, &token_resp)?;
+    let refreshed = serde_json::to_string_pretty(&raw)?;
+    fs_util::atomic_write(path, &refreshed)?;
+    Ok(refreshed)
+}
+
 pub async fn fetch_all_profiles_usage() -> HashMap<String, Result<(UsageResponse, ProfileInfo)>> {
     // Sync Keychain credentials to current profile before fetching usage.
     // Claude Code updates the Keychain directly when refreshing tokens,
