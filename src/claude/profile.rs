@@ -51,14 +51,22 @@ fn read_keychain() -> Result<String> {
     Ok(decode_hex_credentials(trimmed))
 }
 
+fn encode_hex(data: &str) -> String {
+    data.bytes().map(|b| format!("{:02x}", b)).collect()
+}
+
 fn write_keychain(data: &str) -> Result<()> {
     let account = std::env::var("USER").unwrap_or_else(|_| "unknown".to_string());
+    let hex_data = encode_hex(data);
 
     // Delete existing entry (ignore errors if it doesn't exist)
     let _ = Command::new("security")
         .args(["delete-generic-password", "-s", KEYCHAIN_SERVICE])
         .output();
 
+    // Store as hex blob (-X) to match Claude Code's format.
+    // Claude Code reads Keychain with `security -w` which returns hex for blob
+    // entries, then hex-decodes before JSON parsing.
     let output = Command::new("security")
         .args([
             "add-generic-password",
@@ -66,8 +74,8 @@ fn write_keychain(data: &str) -> Result<()> {
             KEYCHAIN_SERVICE,
             "-a",
             &account,
-            "-w",
-            data,
+            "-X",
+            &hex_data,
         ])
         .output()?;
     if !output.status.success() {
@@ -166,6 +174,18 @@ mod tests {
         // Hex that decodes to non-JSON
         let data = "48454c4c4f"; // "HELLO"
         assert_eq!(decode_hex_credentials(data), data);
+    }
+
+    #[test]
+    fn encode_hex_round_trips_with_decode() {
+        let json = r#"{"claudeAiOauth":{"accessToken":"abc"}}"#;
+        let hex = encode_hex(json);
+        assert_eq!(decode_hex_credentials(&hex), json);
+    }
+
+    #[test]
+    fn encode_hex_produces_lowercase_hex() {
+        assert_eq!(encode_hex("AB"), "4142");
     }
 }
 
