@@ -160,7 +160,7 @@ async fn get_access_token_from_credentials(
         .context("Refresh token expired (switch to this profile to re-auth)")?;
     let access_token = token_resp.access_token.clone();
     apply_token_response(&mut raw, &token_resp)?;
-    fs_util::atomic_write(path, &serde_json::to_string_pretty(&raw)?)?;
+    fs_util::atomic_write(path, &serde_json::to_string(&raw)?)?;
 
     Ok((access_token, info))
 }
@@ -176,7 +176,7 @@ pub async fn refresh_credentials_if_expired(path: &Path) -> Result<String> {
 
     let token_resp = refresh_token(&oauth).await?;
     apply_token_response(&mut raw, &token_resp)?;
-    let refreshed = serde_json::to_string_pretty(&raw)?;
+    let refreshed = serde_json::to_string(&raw)?;
     fs_util::atomic_write(path, &refreshed)?;
     Ok(refreshed)
 }
