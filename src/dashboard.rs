@@ -6,12 +6,13 @@ use chrono::Local;
 use console::{Key, Term};
 
 use crate::claude;
+use crate::claude::usage::RateLimitError;
 use crate::codex;
 use crate::codex::usage::RateLimits;
 use crate::display::{DisplayMode, format_usage_line};
 use crate::tool::Tool;
 
-const USAGE_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
+const USAGE_REFRESH_INTERVAL: Duration = Duration::from_secs(60);
 
 #[derive(Clone, Debug, PartialEq)]
 struct ProfileUsageCache {
@@ -70,9 +71,19 @@ fn capitalize_first(s: &str) -> String {
 
 // --- Usage fetching ---
 
-async fn prefetch_claude_usage() -> UsageCache {
+fn format_retry_after(d: Duration) -> String {
+    let secs = d.as_secs();
+    if secs >= 60 {
+        format!("Rate limited (resets in {}m {}s)", secs / 60, secs % 60)
+    } else {
+        format!("Rate limited (resets in {}s)", secs)
+    }
+}
+
+async fn prefetch_claude_usage() -> (UsageCache, Option<Duration>) {
     let results = claude::usage::fetch_all_profiles_usage().await;
-    results
+    let mut max_retry_after: Option<Duration> = None;
+    let cache = results
         .into_iter()
         .map(|(profile, result)| {
             let entry = match result {
@@ -93,14 +104,27 @@ async fn prefetch_claude_usage() -> UsageCache {
                     ],
                     plan_type: info.plan_type,
                 },
-                Err(e) => ProfileUsageCache {
-                    lines: vec![format!("Error: {}", e)],
-                    plan_type: None,
-                },
+                Err(e) => {
+                    if let Some(rate_err) = e.downcast_ref::<RateLimitError>() {
+                        let retry = rate_err.retry_after;
+                        max_retry_after =
+                            Some(max_retry_after.map_or(retry, |prev: Duration| prev.max(retry)));
+                        ProfileUsageCache {
+                            lines: vec![format_retry_after(retry)],
+                            plan_type: None,
+                        }
+                    } else {
+                        ProfileUsageCache {
+                            lines: vec![format!("Error: {}", e)],
+                            plan_type: None,
+                        }
+                    }
+                }
             };
             (profile, entry)
         })
-        .collect()
+        .collect();
+    (cache, max_retry_after)
 }
 
 fn codex_usage_lines(result: Result<Option<RateLimits>>) -> Vec<String> {
@@ -228,9 +252,9 @@ impl DashboardView<'_> {
 
         let header = if self.pending_tools.is_empty() {
             let timestamp = Local::now().format("%H:%M:%S");
-            format!("aip - Usage Monitor (5s refresh)  Updated: {}", timestamp)
+            format!("aip - Usage Monitor (60s refresh)  Updated: {}", timestamp)
         } else {
-            "aip - Usage Monitor (5s refresh)  Refreshing...".to_string()
+            "aip - Usage Monitor (60s refresh)  Refreshing...".to_string()
         };
         lines.push(header);
         lines.push(String::new());
@@ -487,6 +511,7 @@ pub async fn cmd_dashboard() -> Result<()> {
         tokio::pin!(codex_future);
 
         let mut pending_tools: HashSet<Tool> = HashSet::from([Tool::Claude, Tool::Codex]);
+        let mut retry_after: Option<Duration> = None;
 
         // Refresh timer starts after all fetches complete.
         let refresh_sleep = tokio::time::sleep(Duration::from_secs(86400));
@@ -506,11 +531,15 @@ pub async fn cmd_dashboard() -> Result<()> {
             let mut should_render = false;
 
             tokio::select! {
-                cache = &mut claude_future, if pending_tools.contains(&Tool::Claude) => {
+                (cache, claude_retry) = &mut claude_future, if pending_tools.contains(&Tool::Claude) => {
                     usage_caches.insert(Tool::Claude, cache);
+                    if let Some(r) = claude_retry {
+                        retry_after = Some(retry_after.map_or(r, |prev: Duration| prev.max(r)));
+                    }
                     pending_tools.remove(&Tool::Claude);
                     if pending_tools.is_empty() {
-                        refresh_sleep.as_mut().reset(tokio::time::Instant::now() + USAGE_REFRESH_INTERVAL);
+                        let interval = retry_after.map_or(USAGE_REFRESH_INTERVAL, |r| r.max(USAGE_REFRESH_INTERVAL));
+                        refresh_sleep.as_mut().reset(tokio::time::Instant::now() + interval);
                     }
                     should_render = true;
                 }
@@ -518,7 +547,8 @@ pub async fn cmd_dashboard() -> Result<()> {
                     usage_caches.insert(Tool::Codex, cache);
                     pending_tools.remove(&Tool::Codex);
                     if pending_tools.is_empty() {
-                        refresh_sleep.as_mut().reset(tokio::time::Instant::now() + USAGE_REFRESH_INTERVAL);
+                        let interval = retry_after.map_or(USAGE_REFRESH_INTERVAL, |r| r.max(USAGE_REFRESH_INTERVAL));
+                        refresh_sleep.as_mut().reset(tokio::time::Instant::now() + interval);
                     }
                     should_render = true;
                 }

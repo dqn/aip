@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::path::Path;
+use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
 use chrono::{DateTime, Utc};
@@ -43,6 +44,23 @@ pub struct UsageWindow {
     pub utilization: f64,
     pub resets_at: Option<DateTime<Utc>>,
 }
+
+#[derive(Debug)]
+pub struct RateLimitError {
+    pub retry_after: Duration,
+}
+
+impl std::fmt::Display for RateLimitError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "rate limited (retry after {}s)",
+            self.retry_after.as_secs()
+        )
+    }
+}
+
+impl std::error::Error for RateLimitError {}
 
 pub struct ProfileInfo {
     pub plan_type: Option<String>,
@@ -119,6 +137,19 @@ pub async fn fetch_usage_with_token(token: &str) -> Result<UsageResponse> {
         .header("anthropic-beta", "oauth-2025-04-20")
         .send()
         .await?;
+
+    if resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
+        let retry_after_secs = resp
+            .headers()
+            .get("retry-after")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(60);
+        return Err(RateLimitError {
+            retry_after: Duration::from_secs(retry_after_secs),
+        }
+        .into());
+    }
 
     if !resp.status().is_success() {
         return Err(anyhow!(
