@@ -182,9 +182,9 @@ fn is_stale_token_error(e: &anyhow::Error) -> bool {
 ///
 /// For the current profile, re-reads Keychain first in case Claude Code
 /// has already refreshed. If the Keychain token is different, uses it.
-/// If still stale, returns `StaleTokenError` -- we never refresh the
-/// current profile's token to avoid consuming the refresh_token and
-/// breaking Claude Code's active session.
+/// Otherwise refreshes and updates both credentials.json and Keychain
+/// so Claude Code can pick up the new tokens on its next Keychain read.
+/// If refresh fails, returns `StaleTokenError` for graceful degradation.
 ///
 /// For non-current profiles, refreshes normally.
 async fn refresh_stale_token(
@@ -207,16 +207,20 @@ async fn refresh_stale_token(
         return Ok(oauth.access_token);
     }
 
-    // For current profile, never refresh -- return StaleTokenError.
-    if is_current {
-        return Err(StaleTokenError.into());
-    }
-
-    let token_resp = refresh_token(&oauth).await?;
+    let token_resp = match refresh_token(&oauth).await {
+        Ok(resp) => resp,
+        Err(_) if is_current => return Err(StaleTokenError.into()),
+        Err(e) => return Err(e),
+    };
     let access_token = token_resp.access_token.clone();
     apply_token_response(&mut raw, &token_resp)?;
     let new_content = serde_json::to_string(&raw)?;
     fs_util::atomic_write(creds_path, &new_content)?;
+
+    if is_current {
+        // Update Keychain so Claude Code picks up the new tokens.
+        let _ = super::profile::save_to_keychain(&new_content);
+    }
 
     Ok(access_token)
 }
@@ -237,20 +241,17 @@ async fn get_access_token_from_credentials(
         return Ok((oauth.access_token, info));
     }
 
-    // For the current profile, don't refresh — Claude Code manages its token
-    // via Keychain and refreshing here would invalidate Claude Code's token.
-    if is_current {
-        return Err(anyhow!("Access token expired (run Claude Code to refresh)"));
-    }
-
-    // For non-current profiles, it's safe to refresh since Claude Code
-    // doesn't use them.
     let token_resp = refresh_token(&oauth)
         .await
         .context("Refresh token expired (switch to this profile to re-auth)")?;
     let access_token = token_resp.access_token.clone();
     apply_token_response(&mut raw, &token_resp)?;
-    fs_util::atomic_write(path, &serde_json::to_string(&raw)?)?;
+    let new_content = serde_json::to_string(&raw)?;
+    fs_util::atomic_write(path, &new_content)?;
+
+    if is_current {
+        let _ = super::profile::save_to_keychain(&new_content);
+    }
 
     Ok((access_token, info))
 }
