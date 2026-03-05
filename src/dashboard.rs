@@ -6,7 +6,7 @@ use chrono::Local;
 use console::{Key, Term};
 
 use crate::claude;
-use crate::claude::usage::RateLimitError;
+use crate::claude::usage::{RateLimitError, StaleTokenError};
 use crate::codex;
 use crate::codex::usage::RateLimits;
 use crate::display::{DisplayMode, format_usage_line};
@@ -18,6 +18,7 @@ const USAGE_REFRESH_INTERVAL: Duration = Duration::from_secs(60);
 struct ProfileUsageCache {
     lines: Vec<String>,
     plan_type: Option<String>,
+    is_stale: bool,
 }
 
 type UsageCache = HashMap<String, ProfileUsageCache>;
@@ -105,20 +106,29 @@ async fn prefetch_claude_usage() -> (UsageCache, Option<Duration>) {
                         ),
                     ],
                     plan_type: info.plan_type,
+                    is_stale: false,
                 },
                 Err(e) => {
-                    if let Some(rate_err) = e.downcast_ref::<RateLimitError>() {
+                    if e.downcast_ref::<StaleTokenError>().is_some() {
+                        ProfileUsageCache {
+                            lines: vec!["Unable to fetch (token expired)".to_string()],
+                            plan_type: None,
+                            is_stale: true,
+                        }
+                    } else if let Some(rate_err) = e.downcast_ref::<RateLimitError>() {
                         let retry = rate_err.retry_after;
                         max_retry_after =
                             Some(max_retry_after.map_or(retry, |prev: Duration| prev.max(retry)));
                         ProfileUsageCache {
                             lines: vec![format_retry_after(retry)],
                             plan_type: None,
+                            is_stale: false,
                         }
                     } else {
                         ProfileUsageCache {
                             lines: vec![format!("Error: {}", e)],
                             plan_type: None,
+                            is_stale: false,
                         }
                     }
                 }
@@ -127,6 +137,35 @@ async fn prefetch_claude_usage() -> (UsageCache, Option<Duration>) {
         })
         .collect();
     (cache, max_retry_after)
+}
+
+/// Merge new Claude usage cache with old cache.
+///
+/// When a new entry is stale and old entry has valid (non-stale) data,
+/// keep the old data but mark it as stale so the UI can show "(stale)".
+fn merge_claude_cache(new_cache: UsageCache, old_cache: Option<&UsageCache>) -> UsageCache {
+    let old = match old_cache {
+        Some(c) => c,
+        None => return new_cache,
+    };
+    new_cache
+        .into_iter()
+        .map(|(profile, new_entry)| {
+            if new_entry.is_stale
+                && let Some(old_entry) = old.get(&profile)
+                && !old_entry.is_stale
+            {
+                return (
+                    profile,
+                    ProfileUsageCache {
+                        is_stale: true,
+                        ..old_entry.clone()
+                    },
+                );
+            }
+            (profile, new_entry)
+        })
+        .collect()
 }
 
 fn codex_usage_lines(result: Result<Option<RateLimits>>) -> Vec<String> {
@@ -183,6 +222,7 @@ async fn prefetch_codex_usage(profiles: &[String]) -> UsageCache {
                 ProfileUsageCache {
                     lines: codex_usage_lines(result),
                     plan_type: None,
+                    is_stale: false,
                 },
             )
         }));
@@ -284,7 +324,15 @@ impl DashboardView<'_> {
                         .and_then(|e| e.plan_type.as_deref())
                         .map(|pt| format!(" ({})", capitalize_first(pt)))
                         .unwrap_or_default();
-                    let line = format!("{} {}{}{}", cursor, profile, marker, plan_suffix);
+                    let stale_suffix = if entry.is_some_and(|e| e.is_stale) {
+                        " \x1b[2m(stale)\x1b[0m"
+                    } else {
+                        ""
+                    };
+                    let line = format!(
+                        "{} {}{}{}{}",
+                        cursor, profile, marker, plan_suffix, stale_suffix
+                    );
                     if is_selected {
                         lines.push(format!("\x1b[1;36m{}\x1b[0m", line));
                     } else {
@@ -534,7 +582,8 @@ pub async fn cmd_dashboard() -> Result<()> {
 
             tokio::select! {
                 (cache, claude_retry) = &mut claude_future, if pending_tools.contains(&Tool::Claude) => {
-                    usage_caches.insert(Tool::Claude, cache);
+                    let merged = merge_claude_cache(cache, usage_caches.get(&Tool::Claude));
+                    usage_caches.insert(Tool::Claude, merged);
                     if let Some(r) = claude_retry {
                         retry_after = Some(retry_after.map_or(r, |prev: Duration| prev.max(r)));
                     }
@@ -631,6 +680,7 @@ mod tests {
         ProfileUsageCache {
             lines,
             plan_type: plan_type.map(String::from),
+            is_stale: false,
         }
     }
 
@@ -1262,5 +1312,164 @@ mod tests {
             &tool_profiles,
         );
         assert!(matches!(action, DashboardAction::None));
+    }
+
+    #[test]
+    fn merge_claude_cache_keeps_old_data_when_new_is_stale() {
+        let old: UsageCache = HashMap::from([(
+            "main".to_string(),
+            ProfileUsageCache {
+                lines: vec!["5-hour  40.0% used".to_string()],
+                plan_type: Some("pro".to_string()),
+                is_stale: false,
+            },
+        )]);
+        let new: UsageCache = HashMap::from([(
+            "main".to_string(),
+            ProfileUsageCache {
+                lines: vec!["Unable to fetch (token expired)".to_string()],
+                plan_type: None,
+                is_stale: true,
+            },
+        )]);
+
+        let merged = merge_claude_cache(new, Some(&old));
+        let entry = &merged["main"];
+        assert!(entry.is_stale);
+        assert_eq!(entry.lines, vec!["5-hour  40.0% used"]);
+        assert_eq!(entry.plan_type, Some("pro".to_string()));
+    }
+
+    #[test]
+    fn merge_claude_cache_uses_new_data_when_not_stale() {
+        let old: UsageCache = HashMap::from([(
+            "main".to_string(),
+            ProfileUsageCache {
+                lines: vec!["5-hour  40.0% used".to_string()],
+                plan_type: Some("pro".to_string()),
+                is_stale: false,
+            },
+        )]);
+        let new: UsageCache = HashMap::from([(
+            "main".to_string(),
+            ProfileUsageCache {
+                lines: vec!["5-hour  50.0% used".to_string()],
+                plan_type: Some("pro".to_string()),
+                is_stale: false,
+            },
+        )]);
+
+        let merged = merge_claude_cache(new, Some(&old));
+        let entry = &merged["main"];
+        assert!(!entry.is_stale);
+        assert_eq!(entry.lines, vec!["5-hour  50.0% used"]);
+    }
+
+    #[test]
+    fn merge_claude_cache_uses_fallback_when_no_old_data() {
+        let new: UsageCache = HashMap::from([(
+            "main".to_string(),
+            ProfileUsageCache {
+                lines: vec!["Unable to fetch (token expired)".to_string()],
+                plan_type: None,
+                is_stale: true,
+            },
+        )]);
+
+        let merged = merge_claude_cache(new, None);
+        let entry = &merged["main"];
+        assert!(entry.is_stale);
+        assert_eq!(entry.lines, vec!["Unable to fetch (token expired)"]);
+    }
+
+    #[test]
+    fn merge_claude_cache_keeps_stale_fallback_when_old_also_stale() {
+        let old: UsageCache = HashMap::from([(
+            "main".to_string(),
+            ProfileUsageCache {
+                lines: vec!["5-hour  40.0% used".to_string()],
+                plan_type: Some("pro".to_string()),
+                is_stale: true,
+            },
+        )]);
+        let new: UsageCache = HashMap::from([(
+            "main".to_string(),
+            ProfileUsageCache {
+                lines: vec!["Unable to fetch (token expired)".to_string()],
+                plan_type: None,
+                is_stale: true,
+            },
+        )]);
+
+        let merged = merge_claude_cache(new, Some(&old));
+        let entry = &merged["main"];
+        assert!(entry.is_stale);
+        // Old was also stale, so keep old cached data
+        assert_eq!(entry.lines, vec!["Unable to fetch (token expired)"]);
+    }
+
+    #[test]
+    fn build_dashboard_lines_shows_stale_indicator() {
+        let tool_profiles = vec![(
+            Tool::Claude,
+            vec!["main".to_string()],
+            Some("main".to_string()),
+        )];
+        let mut claude_cache: UsageCache = HashMap::new();
+        claude_cache.insert(
+            "main".to_string(),
+            ProfileUsageCache {
+                lines: vec!["5-hour  40.0% used".to_string()],
+                plan_type: Some("pro".to_string()),
+                is_stale: true,
+            },
+        );
+        let mut usage_caches = HashMap::new();
+        usage_caches.insert(Tool::Claude, claude_cache);
+        let selectable_items = build_selectable_items(&tool_profiles);
+
+        let lines = build_lines(
+            &tool_profiles,
+            &usage_caches,
+            &HashSet::new(),
+            &selectable_items,
+            0,
+            &DashboardMode::Normal,
+        );
+
+        assert!(lines.iter().any(|l| l.contains("(stale)")));
+        assert!(lines.iter().any(|l| l.contains("(Pro)")));
+    }
+
+    #[test]
+    fn build_dashboard_lines_hides_stale_when_not_stale() {
+        let tool_profiles = vec![(
+            Tool::Claude,
+            vec!["main".to_string()],
+            Some("main".to_string()),
+        )];
+        let mut claude_cache: UsageCache = HashMap::new();
+        claude_cache.insert(
+            "main".to_string(),
+            ProfileUsageCache {
+                lines: vec!["5-hour  40.0% used".to_string()],
+                plan_type: Some("pro".to_string()),
+                is_stale: false,
+            },
+        );
+        let mut usage_caches = HashMap::new();
+        usage_caches.insert(Tool::Claude, claude_cache);
+        let selectable_items = build_selectable_items(&tool_profiles);
+
+        let lines = build_lines(
+            &tool_profiles,
+            &usage_caches,
+            &HashSet::new(),
+            &selectable_items,
+            0,
+            &DashboardMode::Normal,
+        );
+
+        assert!(!lines.iter().any(|l| l.contains("(stale)")));
     }
 }

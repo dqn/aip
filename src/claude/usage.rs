@@ -62,6 +62,17 @@ impl std::fmt::Display for RateLimitError {
 
 impl std::error::Error for RateLimitError {}
 
+#[derive(Debug)]
+pub struct StaleTokenError;
+
+impl std::fmt::Display for StaleTokenError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "token invalidated server-side (current profile)")
+    }
+}
+
+impl std::error::Error for StaleTokenError {}
+
 pub struct ProfileInfo {
     pub plan_type: Option<String>,
 }
@@ -170,14 +181,12 @@ fn is_stale_token_error(e: &anyhow::Error) -> bool {
 /// Refresh a token that was invalidated server-side (429 + retry-after: 0).
 ///
 /// For the current profile, re-reads Keychain first in case Claude Code
-/// has already refreshed. If still stale, refreshes and updates both
-/// credentials.json and Keychain so Claude Code can pick up the new
-/// refresh token on its next Keychain read.
+/// has already refreshed. If the Keychain token is different, uses it.
+/// If still stale, returns `StaleTokenError` -- we never refresh the
+/// current profile's token to avoid consuming the refresh_token and
+/// breaking Claude Code's active session.
 ///
-/// Race condition: if Claude Code tries to use its in-memory cached
-/// refresh token after we consume it, that single refresh attempt will
-/// fail. However, Keychain will have valid tokens, so Claude Code can
-/// recover by re-reading from Keychain.
+/// For non-current profiles, refreshes normally.
 async fn refresh_stale_token(
     creds_path: &Path,
     is_current: bool,
@@ -198,16 +207,16 @@ async fn refresh_stale_token(
         return Ok(oauth.access_token);
     }
 
+    // For current profile, never refresh -- return StaleTokenError.
+    if is_current {
+        return Err(StaleTokenError.into());
+    }
+
     let token_resp = refresh_token(&oauth).await?;
     let access_token = token_resp.access_token.clone();
     apply_token_response(&mut raw, &token_resp)?;
     let new_content = serde_json::to_string(&raw)?;
     fs_util::atomic_write(creds_path, &new_content)?;
-
-    if is_current {
-        // Update Keychain so Claude Code picks up the new refresh token.
-        let _ = super::profile::save_to_keychain(&new_content);
-    }
 
     Ok(access_token)
 }
@@ -314,7 +323,7 @@ pub async fn fetch_all_profiles_usage() -> HashMap<String, Result<(UsageResponse
 mod tests {
     use std::time::Duration;
 
-    use super::{RateLimitError, UsageResponse, is_stale_token_error};
+    use super::{RateLimitError, StaleTokenError, UsageResponse, is_stale_token_error};
 
     #[test]
     fn is_stale_token_error_detects_zero_retry_after() {
@@ -338,6 +347,18 @@ mod tests {
     fn is_stale_token_error_rejects_other_errors() {
         let err = anyhow::anyhow!("some other error");
         assert!(!is_stale_token_error(&err));
+    }
+
+    #[test]
+    fn stale_token_error_is_not_stale_token_rate_limit() {
+        let err: anyhow::Error = StaleTokenError.into();
+        assert!(!is_stale_token_error(&err));
+    }
+
+    #[test]
+    fn stale_token_error_can_be_downcast() {
+        let err: anyhow::Error = StaleTokenError.into();
+        assert!(err.downcast_ref::<StaleTokenError>().is_some());
     }
 
     #[test]
