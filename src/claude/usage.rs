@@ -162,6 +162,53 @@ pub async fn fetch_usage_with_token(token: &str) -> Result<UsageResponse> {
     Ok(resp.json().await?)
 }
 
+fn is_stale_token_error(e: &anyhow::Error) -> bool {
+    e.downcast_ref::<RateLimitError>()
+        .is_some_and(|r| r.retry_after.is_zero())
+}
+
+/// Refresh a token that was invalidated server-side (429 + retry-after: 0).
+///
+/// For the current profile, re-reads Keychain first in case Claude Code
+/// has already refreshed the token. Only refreshes as a fallback, updating
+/// both credentials.json and Keychain.
+async fn refresh_stale_token(
+    creds_path: &Path,
+    is_current: bool,
+    stale_token: &str,
+) -> Result<String> {
+    if is_current {
+        // Re-read from Keychain: Claude Code may have refreshed the token
+        // while we were calling the usage API.
+        super::profile::sync_keychain_to_current_profile();
+    }
+
+    let content = std::fs::read_to_string(creds_path)?;
+    let mut raw: Value = serde_json::from_str(&content)?;
+    let oauth = read_oauth(&raw)?;
+
+    if is_current && oauth.access_token != stale_token {
+        // Claude Code already refreshed -- use its token.
+        return Ok(oauth.access_token);
+    }
+
+    // Refresh the token ourselves.
+    let token_resp = refresh_token(&oauth).await?;
+    let access_token = token_resp.access_token.clone();
+    apply_token_response(&mut raw, &token_resp)?;
+    let new_content = serde_json::to_string(&raw)?;
+    fs_util::atomic_write(creds_path, &new_content)?;
+
+    if is_current {
+        // Update Keychain so Claude Code picks up the new token/refresh-token.
+        // If Claude Code refreshes concurrently, one side's refresh_token may
+        // already be consumed -- the next dashboard cycle will re-sync.
+        let _ = super::profile::save_to_keychain(&new_content);
+    }
+
+    Ok(access_token)
+}
+
 async fn get_access_token_from_credentials(
     path: &Path,
     is_current: bool,
@@ -235,7 +282,15 @@ pub async fn fetch_all_profiles_usage() -> HashMap<String, Result<(UsageResponse
                 let creds_path = dir.join("credentials.json");
                 let (token, info) =
                     get_access_token_from_credentials(&creds_path, is_current).await?;
-                let usage = fetch_usage_with_token(&token).await?;
+                let usage = match fetch_usage_with_token(&token).await {
+                    Ok(u) => u,
+                    Err(e) if is_stale_token_error(&e) => {
+                        let new_token =
+                            refresh_stale_token(&creds_path, is_current, &token).await?;
+                        fetch_usage_with_token(&new_token).await?
+                    }
+                    Err(e) => return Err(e),
+                };
                 Ok((usage, info))
             }
             .await;
@@ -254,7 +309,33 @@ pub async fn fetch_all_profiles_usage() -> HashMap<String, Result<(UsageResponse
 
 #[cfg(test)]
 mod tests {
-    use super::UsageResponse;
+    use std::time::Duration;
+
+    use super::{RateLimitError, UsageResponse, is_stale_token_error};
+
+    #[test]
+    fn is_stale_token_error_detects_zero_retry_after() {
+        let err: anyhow::Error = RateLimitError {
+            retry_after: Duration::ZERO,
+        }
+        .into();
+        assert!(is_stale_token_error(&err));
+    }
+
+    #[test]
+    fn is_stale_token_error_rejects_nonzero_retry_after() {
+        let err: anyhow::Error = RateLimitError {
+            retry_after: Duration::from_secs(60),
+        }
+        .into();
+        assert!(!is_stale_token_error(&err));
+    }
+
+    #[test]
+    fn is_stale_token_error_rejects_other_errors() {
+        let err = anyhow::anyhow!("some other error");
+        assert!(!is_stale_token_error(&err));
+    }
 
     #[test]
     fn usage_response_accepts_null_resets_at() {
