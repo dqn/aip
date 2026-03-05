@@ -87,6 +87,10 @@ fn write_keychain(data: &str) -> Result<()> {
     Ok(())
 }
 
+pub fn save_to_keychain(data: &str) -> Result<()> {
+    write_keychain(data)
+}
+
 pub fn switch(profile: &str) -> Result<()> {
     let profile_dir = TOOL.profile_dir(profile)?;
     if !profile_dir.exists() {
