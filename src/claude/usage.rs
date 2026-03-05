@@ -169,9 +169,10 @@ fn is_stale_token_error(e: &anyhow::Error) -> bool {
 
 /// Refresh a token that was invalidated server-side (429 + retry-after: 0).
 ///
-/// For the current profile, re-reads Keychain first in case Claude Code
-/// has already refreshed the token. Only refreshes as a fallback, updating
-/// both credentials.json and Keychain.
+/// For the current profile, only re-reads Keychain (Claude Code may have
+/// refreshed). We never refresh the current profile ourselves because
+/// doing so would consume the refresh token and invalidate the one Claude
+/// Code holds in memory, breaking its session.
 async fn refresh_stale_token(
     creds_path: &Path,
     is_current: bool,
@@ -181,30 +182,27 @@ async fn refresh_stale_token(
         // Re-read from Keychain: Claude Code may have refreshed the token
         // while we were calling the usage API.
         super::profile::sync_keychain_to_current_profile();
+        let content = std::fs::read_to_string(creds_path)?;
+        let raw: Value = serde_json::from_str(&content)?;
+        let oauth = read_oauth(&raw)?;
+        if oauth.access_token != stale_token {
+            return Ok(oauth.access_token);
+        }
+        // Keychain token is still stale. Don't refresh -- let Claude Code
+        // handle it to avoid invalidating its in-memory refresh token.
+        return Err(anyhow!(
+            "token invalidated server-side (waiting for Claude Code to refresh)"
+        ));
     }
 
+    // Non-current profiles: safe to refresh since Claude Code doesn't use them.
     let content = std::fs::read_to_string(creds_path)?;
     let mut raw: Value = serde_json::from_str(&content)?;
     let oauth = read_oauth(&raw)?;
-
-    if is_current && oauth.access_token != stale_token {
-        // Claude Code already refreshed -- use its token.
-        return Ok(oauth.access_token);
-    }
-
-    // Refresh the token ourselves.
     let token_resp = refresh_token(&oauth).await?;
     let access_token = token_resp.access_token.clone();
     apply_token_response(&mut raw, &token_resp)?;
-    let new_content = serde_json::to_string(&raw)?;
-    fs_util::atomic_write(creds_path, &new_content)?;
-
-    if is_current {
-        // Update Keychain so Claude Code picks up the new token/refresh-token.
-        // If Claude Code refreshes concurrently, one side's refresh_token may
-        // already be consumed -- the next dashboard cycle will re-sync.
-        let _ = super::profile::save_to_keychain(&new_content);
-    }
+    fs_util::atomic_write(creds_path, &serde_json::to_string(&raw)?)?;
 
     Ok(access_token)
 }
