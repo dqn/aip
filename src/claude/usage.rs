@@ -126,11 +126,7 @@ fn apply_token_response(raw: &mut Value, token_resp: &TokenResponse) -> Result<(
     Ok(())
 }
 
-pub async fn fetch_usage_with_token(token: &str) -> Result<UsageResponse> {
-    if token.is_empty() {
-        return Err(anyhow!("access token is empty"));
-    }
-
+async fn fetch_usage_once(token: &str) -> Result<UsageResponse> {
     let resp = shared_client()
         .get("https://api.anthropic.com/api/oauth/usage")
         .header("Authorization", format!("Bearer {}", token))
@@ -160,6 +156,25 @@ pub async fn fetch_usage_with_token(token: &str) -> Result<UsageResponse> {
     }
 
     Ok(resp.json().await?)
+}
+
+pub async fn fetch_usage_with_token(token: &str) -> Result<UsageResponse> {
+    if token.is_empty() {
+        return Err(anyhow!("access token is empty"));
+    }
+
+    let result = fetch_usage_once(token).await;
+    match &result {
+        Err(e)
+            if e.downcast_ref::<RateLimitError>()
+                .is_some_and(|r| r.retry_after.is_zero()) =>
+        {
+            // retry-after: 0 means the rate limit has just expired; retry once immediately.
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            fetch_usage_once(token).await
+        }
+        _ => result,
+    }
 }
 
 async fn get_access_token_from_credentials(
