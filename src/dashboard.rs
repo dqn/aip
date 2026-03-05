@@ -75,8 +75,10 @@ fn format_retry_after(d: Duration) -> String {
     let secs = d.as_secs();
     if secs >= 60 {
         format!("Rate limited (resets in {}m {}s)", secs / 60, secs % 60)
-    } else {
+    } else if secs > 0 {
         format!("Rate limited (resets in {}s)", secs)
+    } else {
+        "Rate limited".to_string()
     }
 }
 
