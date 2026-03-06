@@ -181,10 +181,11 @@ fn is_stale_token_error(e: &anyhow::Error) -> bool {
 /// Handle a token that was invalidated server-side (429 + retry-after: 0).
 ///
 /// For the current profile, re-reads Keychain in case Claude Code has
-/// already refreshed. Never refreshes the current profile ourselves
-/// to avoid invalidating Claude Code's refresh token (OAuth rotation).
+/// already refreshed. If the token is unchanged, refreshes to get a
+/// working access token but does NOT persist the result -- Keychain and
+/// credentials.json are owned by Claude Code for the current profile.
 ///
-/// For non-current profiles, refreshes normally.
+/// For non-current profiles, refreshes and persists normally.
 async fn refresh_stale_token(
     creds_path: &Path,
     is_current: bool,
@@ -192,7 +193,6 @@ async fn refresh_stale_token(
 ) -> Result<String> {
     if is_current {
         // Re-read from Keychain: Claude Code may have refreshed the token.
-        // Never refresh ourselves -- aip is read-only for the current profile.
         super::profile::sync_keychain_to_current_profile();
         let content = std::fs::read_to_string(creds_path)?;
         let raw: Value = serde_json::from_str(&content)?;
@@ -200,7 +200,12 @@ async fn refresh_stale_token(
         if oauth.access_token != stale_token {
             return Ok(oauth.access_token);
         }
-        return Err(StaleTokenError.into());
+        // Keychain token is also stale. Refresh to get a working access
+        // token but don't persist -- Keychain is owned by Claude Code.
+        match refresh_token(&oauth).await {
+            Ok(resp) => return Ok(resp.access_token),
+            Err(_) => return Err(StaleTokenError.into()),
+        }
     }
 
     let content = std::fs::read_to_string(creds_path)?;
