@@ -6,7 +6,7 @@ use chrono::Local;
 use console::{Key, Term};
 
 use crate::claude;
-use crate::claude::usage::{RateLimitError, StaleTokenError};
+use crate::claude::usage::RateLimitError;
 use crate::codex;
 use crate::codex::usage::RateLimits;
 use crate::display::{DisplayMode, format_usage_line};
@@ -109,20 +109,19 @@ async fn prefetch_claude_usage() -> (UsageCache, Option<Duration>) {
                     is_stale: false,
                 },
                 Err(e) => {
-                    if e.downcast_ref::<StaleTokenError>().is_some() {
-                        ProfileUsageCache {
-                            lines: vec!["Unable to fetch (token expired)".to_string()],
-                            plan_type: None,
-                            is_stale: true,
-                        }
-                    } else if let Some(rate_err) = e.downcast_ref::<RateLimitError>() {
+                    if let Some(rate_err) = e.downcast_ref::<RateLimitError>() {
                         let retry = rate_err.retry_after;
-                        max_retry_after =
-                            Some(max_retry_after.map_or(retry, |prev: Duration| prev.max(retry)));
+                        if !retry.is_zero() {
+                            max_retry_after = Some(
+                                max_retry_after.map_or(retry, |prev: Duration| prev.max(retry)),
+                            );
+                        }
                         ProfileUsageCache {
                             lines: vec![format_retry_after(retry)],
                             plan_type: None,
-                            is_stale: false,
+                            // retry-after:0 may indicate unsupported plan;
+                            // use stale cache to preserve previous usage data.
+                            is_stale: retry.is_zero(),
                         }
                     } else {
                         ProfileUsageCache {
@@ -1335,7 +1334,7 @@ mod tests {
         let new: UsageCache = HashMap::from([(
             "main".to_string(),
             ProfileUsageCache {
-                lines: vec!["Unable to fetch (token expired)".to_string()],
+                lines: vec!["Rate limited".to_string()],
                 plan_type: None,
                 is_stale: true,
             },
@@ -1378,7 +1377,7 @@ mod tests {
         let new: UsageCache = HashMap::from([(
             "main".to_string(),
             ProfileUsageCache {
-                lines: vec!["Unable to fetch (token expired)".to_string()],
+                lines: vec!["Rate limited".to_string()],
                 plan_type: None,
                 is_stale: true,
             },
@@ -1387,7 +1386,7 @@ mod tests {
         let merged = merge_claude_cache(new, None);
         let entry = &merged["main"];
         assert!(entry.is_stale);
-        assert_eq!(entry.lines, vec!["Unable to fetch (token expired)"]);
+        assert_eq!(entry.lines, vec!["Rate limited"]);
     }
 
     #[test]
@@ -1403,7 +1402,7 @@ mod tests {
         let new: UsageCache = HashMap::from([(
             "main".to_string(),
             ProfileUsageCache {
-                lines: vec!["Unable to fetch (token expired)".to_string()],
+                lines: vec!["Rate limited".to_string()],
                 plan_type: None,
                 is_stale: true,
             },
@@ -1413,7 +1412,7 @@ mod tests {
         let entry = &merged["main"];
         assert!(entry.is_stale);
         // Old was also stale, so keep old cached data
-        assert_eq!(entry.lines, vec!["Unable to fetch (token expired)"]);
+        assert_eq!(entry.lines, vec!["Rate limited"]);
     }
 
     #[test]

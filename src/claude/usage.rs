@@ -62,17 +62,6 @@ impl std::fmt::Display for RateLimitError {
 
 impl std::error::Error for RateLimitError {}
 
-#[derive(Debug)]
-pub struct StaleTokenError;
-
-impl std::fmt::Display for StaleTokenError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "token invalidated server-side (current profile)")
-    }
-}
-
-impl std::error::Error for StaleTokenError {}
-
 pub struct ProfileInfo {
     pub plan_type: Option<String>,
 }
@@ -173,54 +162,6 @@ pub async fn fetch_usage_with_token(token: &str) -> Result<UsageResponse> {
     Ok(resp.json().await?)
 }
 
-fn is_stale_token_error(e: &anyhow::Error) -> bool {
-    e.downcast_ref::<RateLimitError>()
-        .is_some_and(|r| r.retry_after.is_zero())
-}
-
-/// Handle a token that was invalidated server-side (429 + retry-after: 0).
-///
-/// For the current profile, re-reads Keychain in case Claude Code has
-/// already refreshed. If the token is unchanged, refreshes to get a
-/// working access token but does NOT persist the result -- Keychain and
-/// credentials.json are owned by Claude Code for the current profile.
-///
-/// For non-current profiles, refreshes and persists normally.
-async fn refresh_stale_token(
-    creds_path: &Path,
-    is_current: bool,
-    stale_token: &str,
-) -> Result<String> {
-    if is_current {
-        // Re-read from Keychain: Claude Code may have refreshed the token.
-        super::profile::sync_keychain_to_current_profile();
-        let content = std::fs::read_to_string(creds_path)?;
-        let raw: Value = serde_json::from_str(&content)?;
-        let oauth = read_oauth(&raw)?;
-        if oauth.access_token != stale_token {
-            return Ok(oauth.access_token);
-        }
-        // Keychain token is also stale. Refresh to get a working access
-        // token but don't persist -- Keychain is owned by Claude Code.
-        match refresh_token(&oauth).await {
-            Ok(resp) => return Ok(resp.access_token),
-            Err(_) => return Err(StaleTokenError.into()),
-        }
-    }
-
-    let content = std::fs::read_to_string(creds_path)?;
-    let mut raw: Value = serde_json::from_str(&content)?;
-    let oauth = read_oauth(&raw)?;
-
-    let token_resp = refresh_token(&oauth).await?;
-    let access_token = token_resp.access_token.clone();
-    apply_token_response(&mut raw, &token_resp)?;
-    let new_content = serde_json::to_string(&raw)?;
-    fs_util::atomic_write(creds_path, &new_content)?;
-
-    Ok(access_token)
-}
-
 async fn get_access_token_from_credentials(
     path: &Path,
     is_current: bool,
@@ -291,15 +232,7 @@ pub async fn fetch_all_profiles_usage() -> HashMap<String, Result<(UsageResponse
                 let creds_path = dir.join("credentials.json");
                 let (token, info) =
                     get_access_token_from_credentials(&creds_path, is_current).await?;
-                let usage = match fetch_usage_with_token(&token).await {
-                    Ok(u) => u,
-                    Err(e) if is_stale_token_error(&e) => {
-                        let new_token =
-                            refresh_stale_token(&creds_path, is_current, &token).await?;
-                        fetch_usage_with_token(&new_token).await?
-                    }
-                    Err(e) => return Err(e),
-                };
+                let usage = fetch_usage_with_token(&token).await?;
                 Ok((usage, info))
             }
             .await;
@@ -318,45 +251,7 @@ pub async fn fetch_all_profiles_usage() -> HashMap<String, Result<(UsageResponse
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
-
-    use super::{RateLimitError, StaleTokenError, UsageResponse, is_stale_token_error};
-
-    #[test]
-    fn is_stale_token_error_detects_zero_retry_after() {
-        let err: anyhow::Error = RateLimitError {
-            retry_after: Duration::ZERO,
-        }
-        .into();
-        assert!(is_stale_token_error(&err));
-    }
-
-    #[test]
-    fn is_stale_token_error_rejects_nonzero_retry_after() {
-        let err: anyhow::Error = RateLimitError {
-            retry_after: Duration::from_secs(60),
-        }
-        .into();
-        assert!(!is_stale_token_error(&err));
-    }
-
-    #[test]
-    fn is_stale_token_error_rejects_other_errors() {
-        let err = anyhow::anyhow!("some other error");
-        assert!(!is_stale_token_error(&err));
-    }
-
-    #[test]
-    fn stale_token_error_is_not_stale_token_rate_limit() {
-        let err: anyhow::Error = StaleTokenError.into();
-        assert!(!is_stale_token_error(&err));
-    }
-
-    #[test]
-    fn stale_token_error_can_be_downcast() {
-        let err: anyhow::Error = StaleTokenError.into();
-        assert!(err.downcast_ref::<StaleTokenError>().is_some());
-    }
+    use super::UsageResponse;
 
     #[test]
     fn usage_response_accepts_null_resets_at() {
