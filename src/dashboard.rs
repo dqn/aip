@@ -619,12 +619,20 @@ pub async fn cmd_dashboard() -> Result<()> {
                         DashboardAction::Reload => break,
                         DashboardAction::Switch(tool, ref profile) => {
                             if tool == Tool::Claude
-                                && let Ok(dir) = Tool::Claude.profile_dir(profile) {
-                                    let _ = claude::usage::refresh_credentials_if_expired(
-                                        &dir.join("credentials.json"),
-                                    )
-                                    .await;
+                                && let Ok(dir) = Tool::Claude.profile_dir(profile)
+                            {
+                                // Refresh only non-current profiles before switching.
+                                // The current profile's token is managed by Claude Code.
+                                let current =
+                                    Tool::Claude.current_profile().ok().flatten();
+                                if current.as_deref() != Some(profile.as_str()) {
+                                    let _ =
+                                        claude::usage::refresh_credentials_if_expired(
+                                            &dir.join("credentials.json"),
+                                        )
+                                        .await;
                                 }
+                            }
                             if switch_profile(tool, profile).is_ok() {
                                 break;
                             }
