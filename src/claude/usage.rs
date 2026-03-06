@@ -228,23 +228,11 @@ async fn get_access_token_from_credentials(
         plan_type: oauth.plan_type.clone(),
     };
 
-    if !is_token_expired(&oauth) {
-        return Ok((oauth.access_token, info));
-    }
-
-    if is_current {
-        // Re-sync from Keychain: Claude Code may have already refreshed.
-        // Never refresh ourselves -- aip is read-only for the current profile.
-        super::profile::sync_keychain_to_current_profile();
-        let content = std::fs::read_to_string(path)?;
-        let raw: Value = serde_json::from_str(&content)?;
-        let oauth = read_oauth(&raw)?;
-        if is_token_expired(&oauth) {
-            return Err(StaleTokenError.into());
-        }
-        let info = ProfileInfo {
-            plan_type: oauth.plan_type.clone(),
-        };
+    // For the current profile, always use the token as-is. aip is read-only
+    // for the current profile; if the token is actually expired server-side,
+    // the usage API will return 429+retry-after:0 and refresh_stale_token
+    // will re-read from Keychain where Claude Code may have refreshed it.
+    if is_current || !is_token_expired(&oauth) {
         return Ok((oauth.access_token, info));
     }
 
