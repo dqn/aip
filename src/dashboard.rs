@@ -12,8 +12,6 @@ use crate::codex::usage::RateLimits;
 use crate::display::{DisplayMode, format_usage_line};
 use crate::tool::Tool;
 
-const USAGE_REFRESH_INTERVAL: Duration = Duration::from_secs(60);
-
 #[derive(Clone, Debug, PartialEq)]
 struct ProfileUsageCache {
     lines: Vec<String>,
@@ -293,9 +291,9 @@ impl DashboardView<'_> {
 
         let header = if self.pending_tools.is_empty() {
             let timestamp = Local::now().format("%H:%M:%S");
-            format!("aip - Usage Monitor (60s refresh)  Updated: {}", timestamp)
+            format!("aip - Usage Monitor  Updated: {}", timestamp)
         } else {
-            "aip - Usage Monitor (60s refresh)  Refreshing...".to_string()
+            "aip - Usage Monitor  Refreshing...".to_string()
         };
         lines.push(header);
         lines.push(String::new());
@@ -358,7 +356,7 @@ impl DashboardView<'_> {
         match self.mode {
             DashboardMode::Normal => {
                 lines.push(
-                    "[↑↓] Navigate  [Shift+J/K] Reorder  [Enter/Space] Switch  [BS/Del] Delete  [ESC/q] Quit"
+                    "[↑↓] Navigate  [Shift+J/K] Reorder  [Enter/Space] Switch  [BS/Del] Delete  [r] Refresh  [ESC/q] Quit"
                         .to_string(),
                 );
             }
@@ -488,6 +486,7 @@ fn handle_dashboard_key(
                 *mode = DashboardMode::DeleteConfirm(*selected);
                 DashboardAction::Render
             }
+            Key::Char('r') => DashboardAction::Reload,
             Key::Char('K') => handle_move(selected, selectable_items, tool_profiles, -1),
             Key::Char('J') => handle_move(selected, selectable_items, tool_profiles, 1),
             Key::Escape | Key::Char('q') => DashboardAction::Quit,
@@ -560,11 +559,6 @@ pub async fn cmd_dashboard() -> Result<()> {
         tokio::pin!(codex_future);
 
         let mut pending_tools: HashSet<Tool> = HashSet::from([Tool::Claude, Tool::Codex]);
-        let mut retry_after: Option<Duration> = None;
-
-        // Refresh timer starts after all fetches complete.
-        let refresh_sleep = tokio::time::sleep(Duration::from_secs(86400));
-        tokio::pin!(refresh_sleep);
 
         render_dashboard(
             &term,
@@ -580,26 +574,15 @@ pub async fn cmd_dashboard() -> Result<()> {
             let mut should_render = false;
 
             tokio::select! {
-                (cache, claude_retry) = &mut claude_future, if pending_tools.contains(&Tool::Claude) => {
+                (cache, _claude_retry) = &mut claude_future, if pending_tools.contains(&Tool::Claude) => {
                     let merged = merge_claude_cache(cache, usage_caches.get(&Tool::Claude));
                     usage_caches.insert(Tool::Claude, merged);
-                    if let Some(r) = claude_retry {
-                        retry_after = Some(retry_after.map_or(r, |prev: Duration| prev.max(r)));
-                    }
                     pending_tools.remove(&Tool::Claude);
-                    if pending_tools.is_empty() {
-                        let interval = retry_after.map_or(USAGE_REFRESH_INTERVAL, |r| r.max(USAGE_REFRESH_INTERVAL));
-                        refresh_sleep.as_mut().reset(tokio::time::Instant::now() + interval);
-                    }
                     should_render = true;
                 }
                 cache = &mut codex_future, if pending_tools.contains(&Tool::Codex) => {
                     usage_caches.insert(Tool::Codex, cache);
                     pending_tools.remove(&Tool::Codex);
-                    if pending_tools.is_empty() {
-                        let interval = retry_after.map_or(USAGE_REFRESH_INTERVAL, |r| r.max(USAGE_REFRESH_INTERVAL));
-                        refresh_sleep.as_mut().reset(tokio::time::Instant::now() + interval);
-                    }
                     should_render = true;
                 }
                 Some(key_result) = key_rx.recv() => {
@@ -639,9 +622,6 @@ pub async fn cmd_dashboard() -> Result<()> {
                         DashboardAction::Render => should_render = true,
                         DashboardAction::None => {}
                     }
-                }
-                _ = &mut refresh_sleep, if pending_tools.is_empty() => {
-                    break;
                 }
             }
 
@@ -1293,6 +1273,23 @@ mod tests {
             DashboardAction::Reload => assert_eq!(selected, 0),
             _ => assert_eq!(selected, 1),
         }
+    }
+
+    #[test]
+    fn handle_dashboard_key_r_reloads() {
+        let tool_profiles = sample_tool_profiles();
+        let selectable_items = build_selectable_items(&tool_profiles);
+        let mut selected = 0;
+        let mut mode = DashboardMode::Normal;
+
+        let action = handle_dashboard_key(
+            Key::Char('r'),
+            &mut selected,
+            &mut mode,
+            &selectable_items,
+            &tool_profiles,
+        );
+        assert!(matches!(action, DashboardAction::Reload));
     }
 
     #[test]
