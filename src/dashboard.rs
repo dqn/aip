@@ -356,7 +356,7 @@ impl DashboardView<'_> {
         match self.mode {
             DashboardMode::Normal => {
                 lines.push(
-                    "[↑↓] Navigate  [Shift+J/K] Reorder  [Enter/Space] Switch  [BS/Del] Delete  [r] Refresh  [ESC/q] Quit"
+                    "[R] Refresh  [↑↓] Navigate  [Enter/Space] Switch  [BS/Del] Delete  [Shift+J/K] Reorder  [ESC/q] Quit"
                         .to_string(),
                 );
             }
