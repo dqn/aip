@@ -329,9 +329,15 @@ impl DashboardView<'_> {
                     } else {
                         ""
                     };
+                    let spinner_suffix = if self.pending_tools.contains(tool) {
+                        let spinner = SPINNER_FRAMES[self.spinner_frame % SPINNER_FRAMES.len()];
+                        format!(" {}", spinner)
+                    } else {
+                        String::new()
+                    };
                     let line = format!(
-                        "{} {}{}{}{}",
-                        cursor, profile, marker, plan_suffix, stale_suffix
+                        "{} {}{}{}{}{}",
+                        cursor, profile, marker, plan_suffix, stale_suffix, spinner_suffix
                     );
                     if is_selected {
                         lines.push(format!("\x1b[1;36m{}\x1b[0m", line));
@@ -343,10 +349,7 @@ impl DashboardView<'_> {
                         for line in &entry.lines {
                             lines.push(format!("    {}", line));
                         }
-                    } else if self.pending_tools.contains(tool) {
-                        let spinner = SPINNER_FRAMES[self.spinner_frame % SPINNER_FRAMES.len()];
-                        lines.push(format!("    {}", spinner));
-                    } else {
+                    } else if !self.pending_tools.contains(tool) {
                         lines.push("    (no data)".to_string());
                     }
 
@@ -856,6 +859,40 @@ mod tests {
 
         assert!(lines.iter().any(|l| l.contains("60.0% used")));
         assert!(!lines.iter().any(|l| l.contains("(no data)")));
+    }
+
+    #[test]
+    fn build_dashboard_lines_shows_spinner_on_profile_line_when_pending_with_cache() {
+        let tool_profiles = vec![(
+            Tool::Claude,
+            vec!["personal".to_string()],
+            Some("personal".to_string()),
+        )];
+        let mut claude_cache: UsageCache = HashMap::new();
+        claude_cache.insert(
+            "personal".to_string(),
+            make_entry(vec!["5-hour  60.0% used".to_string()], None),
+        );
+        let mut usage_caches = HashMap::new();
+        usage_caches.insert(Tool::Claude, claude_cache);
+        let pending_tools = HashSet::from([Tool::Claude]);
+        let selectable_items = build_selectable_items(&tool_profiles);
+
+        let lines = build_lines(
+            &tool_profiles,
+            &usage_caches,
+            &pending_tools,
+            &selectable_items,
+            0,
+            &DashboardMode::Normal,
+            0,
+        );
+
+        // Spinner appears on the profile name line
+        let profile_line = lines.iter().find(|l| l.contains("personal")).unwrap();
+        assert!(profile_line.contains(SPINNER_FRAMES[0]));
+        // Cached data is still shown
+        assert!(lines.iter().any(|l| l.contains("60.0% used")));
     }
 
     #[test]
