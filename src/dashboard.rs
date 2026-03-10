@@ -12,6 +12,8 @@ use crate::codex::usage::RateLimits;
 use crate::display::{DisplayMode, format_usage_line};
 use crate::tool::Tool;
 
+const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
 #[derive(Clone, Debug, PartialEq)]
 struct ProfileUsageCache {
     lines: Vec<String>,
@@ -29,7 +31,7 @@ enum DashboardMode {
 enum DashboardAction {
     None,
     Render,
-    Reload,
+    Refresh,
     Switch(Tool, String),
     Quit,
 }
@@ -283,6 +285,7 @@ struct DashboardView<'a> {
     selectable_items: &'a [(Tool, String)],
     selected: usize,
     mode: &'a DashboardMode,
+    spinner_frame: usize,
 }
 
 impl DashboardView<'_> {
@@ -341,7 +344,8 @@ impl DashboardView<'_> {
                             lines.push(format!("    {}", line));
                         }
                     } else if self.pending_tools.contains(tool) {
-                        lines.push("    (loading...)".to_string());
+                        let spinner = SPINNER_FRAMES[self.spinner_frame % SPINNER_FRAMES.len()];
+                        lines.push(format!("    {}", spinner));
                     } else {
                         lines.push("    (no data)".to_string());
                     }
@@ -432,7 +436,7 @@ fn handle_move(
 
     if tool.save_profile_order(&profiles).is_ok() {
         *selected = target as usize;
-        DashboardAction::Reload
+        DashboardAction::Refresh
     } else {
         DashboardAction::None
     }
@@ -486,7 +490,7 @@ fn handle_dashboard_key(
                 *mode = DashboardMode::DeleteConfirm(*selected);
                 DashboardAction::Render
             }
-            Key::Char('r') => DashboardAction::Reload,
+            Key::Char('r') => DashboardAction::Refresh,
             Key::Char('K') => handle_move(selected, selectable_items, tool_profiles, -1),
             Key::Char('J') => handle_move(selected, selectable_items, tool_profiles, 1),
             Key::Escape | Key::Char('q') => DashboardAction::Quit,
@@ -500,7 +504,7 @@ fn handle_dashboard_key(
                     let result = tool.delete_profile(profile);
                     *mode = DashboardMode::Normal;
                     if result.is_ok() {
-                        DashboardAction::Reload
+                        DashboardAction::Refresh
                     } else {
                         DashboardAction::Render
                     }
@@ -515,6 +519,7 @@ fn handle_dashboard_key(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_dashboard(
     term: &Term,
     tool_profiles: &[(Tool, Vec<String>, Option<String>)],
@@ -523,6 +528,7 @@ fn render_dashboard(
     selectable_items: &[(Tool, String)],
     selected: usize,
     mode: &DashboardMode,
+    spinner_frame: usize,
 ) -> Result<()> {
     DashboardView {
         tool_profiles,
@@ -531,6 +537,7 @@ fn render_dashboard(
         selectable_items,
         selected,
         mode,
+        spinner_frame,
     }
     .render(term)
 }
@@ -545,6 +552,8 @@ pub async fn cmd_dashboard() -> Result<()> {
     let mut key_rx = spawn_key_reader();
     let mut selected: usize = 0;
     let mut mode = DashboardMode::Normal;
+    let mut spinner_frame: usize = 0;
+    let mut spinner_interval = tokio::time::interval(Duration::from_millis(80));
 
     loop {
         let tool_profiles = load_tool_profiles();
@@ -568,6 +577,7 @@ pub async fn cmd_dashboard() -> Result<()> {
             &selectable_items,
             selected,
             &mode,
+            spinner_frame,
         )?;
 
         loop {
@@ -585,6 +595,10 @@ pub async fn cmd_dashboard() -> Result<()> {
                     pending_tools.remove(&Tool::Codex);
                     should_render = true;
                 }
+                _ = spinner_interval.tick(), if !pending_tools.is_empty() => {
+                    spinner_frame = spinner_frame.wrapping_add(1);
+                    should_render = true;
+                }
                 Some(key_result) = key_rx.recv() => {
                     let key = match key_result {
                         Ok(k) => k,
@@ -598,7 +612,7 @@ pub async fn cmd_dashboard() -> Result<()> {
                         &tool_profiles,
                     ) {
                         DashboardAction::Quit => return Ok(()),
-                        DashboardAction::Reload => break,
+                        DashboardAction::Refresh => break,
                         DashboardAction::Switch(tool, ref profile) => {
                             if tool == Tool::Claude
                                 && let Ok(dir) = Tool::Claude.profile_dir(profile)
@@ -634,6 +648,7 @@ pub async fn cmd_dashboard() -> Result<()> {
                     &selectable_items,
                     selected,
                     &mode,
+                    spinner_frame,
                 )?;
             }
         }
@@ -651,6 +666,7 @@ mod tests {
         selectable_items: &[(Tool, String)],
         selected: usize,
         mode: &DashboardMode,
+        spinner_frame: usize,
     ) -> Vec<String> {
         DashboardView {
             tool_profiles,
@@ -659,6 +675,7 @@ mod tests {
             selectable_items,
             selected,
             mode,
+            spinner_frame,
         }
         .build_lines()
     }
@@ -736,6 +753,7 @@ mod tests {
             &selectable_items,
             1,
             &DashboardMode::Normal,
+            0,
         );
 
         assert!(lines.iter().any(|l| l.starts_with("  personal")));
@@ -754,6 +772,7 @@ mod tests {
             &selectable_items,
             0,
             &DashboardMode::Normal,
+            0,
         );
 
         let no_profiles_count = lines.iter().filter(|l| l.contains("(no profiles)")).count();
@@ -776,6 +795,7 @@ mod tests {
             &selectable_items,
             0,
             &DashboardMode::Normal,
+            0,
         );
 
         assert!(
@@ -802,6 +822,7 @@ mod tests {
             &selectable_items,
             0,
             &DashboardMode::Normal,
+            0,
         );
 
         assert!(lines.iter().any(|l| l.contains("(no data)")));
@@ -830,6 +851,7 @@ mod tests {
             &selectable_items,
             0,
             &DashboardMode::Normal,
+            0,
         );
 
         assert!(lines.iter().any(|l| l.contains("60.0% used")));
@@ -837,7 +859,7 @@ mod tests {
     }
 
     #[test]
-    fn build_dashboard_lines_shows_loading_when_tool_pending() {
+    fn build_dashboard_lines_shows_spinner_when_tool_pending() {
         let tool_profiles = vec![(
             Tool::Claude,
             vec!["personal".to_string()],
@@ -853,10 +875,46 @@ mod tests {
             &selectable_items,
             0,
             &DashboardMode::Normal,
+            0,
         );
 
-        assert!(lines.iter().any(|l| l.contains("(loading...)")));
+        assert!(lines.iter().any(|l| l.contains(SPINNER_FRAMES[0])));
         assert!(!lines.iter().any(|l| l.contains("(no data)")));
+    }
+
+    #[test]
+    fn build_dashboard_lines_spinner_advances_with_frame() {
+        let tool_profiles = vec![(
+            Tool::Claude,
+            vec!["personal".to_string()],
+            Some("personal".to_string()),
+        )];
+        let pending_tools = HashSet::from([Tool::Claude]);
+        let selectable_items = build_selectable_items(&tool_profiles);
+
+        let lines_frame_0 = build_lines(
+            &tool_profiles,
+            &HashMap::new(),
+            &pending_tools,
+            &selectable_items,
+            0,
+            &DashboardMode::Normal,
+            0,
+        );
+        let lines_frame_1 = build_lines(
+            &tool_profiles,
+            &HashMap::new(),
+            &pending_tools,
+            &selectable_items,
+            0,
+            &DashboardMode::Normal,
+            1,
+        );
+
+        let spinner_line_0 = lines_frame_0.iter().find(|l| l.contains(SPINNER_FRAMES[0]));
+        let spinner_line_1 = lines_frame_1.iter().find(|l| l.contains(SPINNER_FRAMES[1]));
+        assert!(spinner_line_0.is_some());
+        assert!(spinner_line_1.is_some());
     }
 
     #[test]
@@ -872,6 +930,7 @@ mod tests {
             &selectable_items,
             0,
             &DashboardMode::Normal,
+            0,
         );
 
         assert!(lines[0].contains("Refreshing..."));
@@ -890,6 +949,7 @@ mod tests {
             &selectable_items,
             0,
             &DashboardMode::Normal,
+            0,
         );
 
         assert!(lines[0].contains("Updated:"));
@@ -919,6 +979,7 @@ mod tests {
             &selectable_items,
             0,
             &DashboardMode::Normal,
+            0,
         );
 
         assert!(
@@ -951,6 +1012,7 @@ mod tests {
             &selectable_items,
             0,
             &DashboardMode::Normal,
+            0,
         );
 
         let profile_line = lines
@@ -972,6 +1034,7 @@ mod tests {
             &selectable_items,
             0,
             &DashboardMode::Normal,
+            0,
         );
 
         let footer = lines.last().unwrap();
@@ -998,6 +1061,7 @@ mod tests {
             &selectable_items,
             1,
             &DashboardMode::DeleteConfirm(1),
+            0,
         );
 
         let footer = lines.last().unwrap();
@@ -1250,7 +1314,7 @@ mod tests {
         // handle_move calls save_profile_order which may fail in test env,
         // but selected should still be updated on success (Reload) or unchanged (None).
         match action {
-            DashboardAction::Reload => assert_eq!(selected, 1),
+            DashboardAction::Refresh => assert_eq!(selected, 1),
             _ => assert_eq!(selected, 0),
         }
     }
@@ -1270,13 +1334,13 @@ mod tests {
             &tool_profiles,
         );
         match action {
-            DashboardAction::Reload => assert_eq!(selected, 0),
+            DashboardAction::Refresh => assert_eq!(selected, 0),
             _ => assert_eq!(selected, 1),
         }
     }
 
     #[test]
-    fn handle_dashboard_key_r_reloads() {
+    fn handle_dashboard_key_r_refreshes() {
         let tool_profiles = sample_tool_profiles();
         let selectable_items = build_selectable_items(&tool_profiles);
         let mut selected = 0;
@@ -1289,7 +1353,7 @@ mod tests {
             &selectable_items,
             &tool_profiles,
         );
-        assert!(matches!(action, DashboardAction::Reload));
+        assert!(matches!(action, DashboardAction::Refresh));
     }
 
     #[test]
@@ -1439,6 +1503,7 @@ mod tests {
             &selectable_items,
             0,
             &DashboardMode::Normal,
+            0,
         );
 
         assert!(lines.iter().any(|l| l.contains("(stale)")));
@@ -1472,6 +1537,7 @@ mod tests {
             &selectable_items,
             0,
             &DashboardMode::Normal,
+            0,
         );
 
         assert!(!lines.iter().any(|l| l.contains("(stale)")));
