@@ -45,6 +45,7 @@ pub fn format_usage_line(
         DisplayMode::Used => (percent, format!("{color}used{RESET}")),
         DisplayMode::Left => (100.0 - percent, format!("{color}left{RESET}")),
     };
+    let display_percent = display_percent.clamp(0.0, 100.0);
     let reset_label = match resets_at {
         Some(reset_at) => format!("resets at {}", format_reset_time(reset_at)),
         None => "session not started".to_string(),
