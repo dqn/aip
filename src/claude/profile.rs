@@ -59,17 +59,14 @@ fn write_keychain(data: &str) -> Result<()> {
     let account = std::env::var("USER").unwrap_or_else(|_| "unknown".to_string());
     let hex_data = encode_hex(data);
 
-    // Delete existing entry (ignore errors if it doesn't exist)
-    let _ = Command::new("security")
-        .args(["delete-generic-password", "-s", KEYCHAIN_SERVICE])
-        .output();
-
     // Store as hex blob (-X) to match Claude Code's format.
     // Claude Code reads Keychain with `security -w` which returns hex for blob
     // entries, then hex-decodes before JSON parsing.
+    // -U updates an existing entry or creates a new one atomically.
     let output = Command::new("security")
         .args([
             "add-generic-password",
+            "-U",
             "-s",
             KEYCHAIN_SERVICE,
             "-a",

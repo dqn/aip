@@ -187,7 +187,7 @@ async fn get_access_token_from_credentials(
         .context("Refresh token expired (switch to this profile to re-auth)")?;
     let access_token = token_resp.access_token.clone();
     apply_token_response(&mut raw, &token_resp)?;
-    let new_content = serde_json::to_string(&raw)?;
+    let new_content = serde_json::to_string_pretty(&raw)?;
     fs_util::atomic_write(path, &new_content)?;
 
     Ok((access_token, info))
@@ -204,7 +204,7 @@ pub async fn refresh_credentials_if_expired(path: &Path) -> Result<String> {
 
     let token_resp = refresh_token(&oauth).await?;
     apply_token_response(&mut raw, &token_resp)?;
-    let refreshed = serde_json::to_string(&raw)?;
+    let refreshed = serde_json::to_string_pretty(&raw)?;
     fs_util::atomic_write(path, &refreshed)?;
     Ok(refreshed)
 }
@@ -213,7 +213,9 @@ pub async fn fetch_all_profiles_usage() -> HashMap<String, Result<(UsageResponse
     // Sync Keychain credentials to current profile before fetching usage.
     // Claude Code updates the Keychain directly when refreshing tokens,
     // so the profile's credentials.json may be stale.
-    super::profile::sync_keychain_to_current_profile();
+    // Run on a blocking thread to avoid stalling the Tokio worker with
+    // the synchronous `security` subprocess call.
+    let _ = tokio::task::spawn_blocking(super::profile::sync_keychain_to_current_profile).await;
 
     let current_profile = Tool::Claude.current_profile().ok().flatten();
 
