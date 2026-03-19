@@ -72,16 +72,22 @@ fn sync_auth_to_current_profile() {
         .and_then(|t| t.get("account_id"))
         .and_then(|a| a.as_str());
 
-    if let (Some(src_id), Some(dest_id)) = (src_account, dest_account)
-        && src_id != dest_id
-    {
-        eprintln!(
-            "Warning: Current auth.json (account: '{}') differs from profile '{}' (account: '{}').",
-            src_id, current, dest_id,
-        );
-        eprintln!("Skipping sync to protect stored credentials.");
-        eprintln!("Re-authenticate and run 'aip save' to save to the correct profile.");
-        return;
+    match (src_account, dest_account) {
+        (Some(src_id), Some(dest_id)) if src_id != dest_id => {
+            eprintln!(
+                "Warning: Current auth.json (account: '{}') differs from profile '{}' (account: '{}').",
+                src_id, current, dest_id,
+            );
+            eprintln!("Skipping sync to protect stored credentials.");
+            eprintln!("Re-authenticate and run 'aip save' to save to the correct profile.");
+            return;
+        }
+        (Some(_), None) | (None, Some(_)) => {
+            // One side has account_id and the other doesn't; skip to avoid
+            // potential cross-account credential overwrite.
+            return;
+        }
+        _ => {}
     }
 
     if let Err(e) = fs_util::atomic_copy(&src, &dest) {
@@ -102,11 +108,11 @@ pub fn save(name: &str) -> Result<()> {
     let newly_created = !dest_dir.exists();
     fs::create_dir_all(&dest_dir)?;
     let dest_path = dest_dir.join("auth.json");
-    if let Err(e) = fs::copy(&src, &dest_path) {
+    if let Err(e) = fs_util::atomic_copy(&src, &dest_path) {
         if newly_created {
             let _ = fs::remove_dir_all(&dest_dir);
         }
-        return Err(e.into());
+        return Err(e);
     }
     #[cfg(unix)]
     fs::set_permissions(&dest_path, fs::Permissions::from_mode(0o600))?;
