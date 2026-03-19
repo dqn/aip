@@ -83,10 +83,10 @@ fn format_retry_after(d: Duration) -> String {
     }
 }
 
-async fn prefetch_claude_usage() -> (UsageCache, Option<Duration>) {
+async fn prefetch_claude_usage() -> UsageCache {
     let results = claude::usage::fetch_all_profiles_usage().await;
-    let mut max_retry_after: Option<Duration> = None;
-    let cache = results
+
+    results
         .into_iter()
         .map(|(profile, result)| {
             let entry = match result {
@@ -111,11 +111,6 @@ async fn prefetch_claude_usage() -> (UsageCache, Option<Duration>) {
                 Err(e) => {
                     if let Some(rate_err) = e.downcast_ref::<RateLimitError>() {
                         let retry = rate_err.retry_after;
-                        if !retry.is_zero() {
-                            max_retry_after = Some(
-                                max_retry_after.map_or(retry, |prev: Duration| prev.max(retry)),
-                            );
-                        }
                         ProfileUsageCache {
                             lines: vec![format_retry_after(retry)],
                             plan_type: None,
@@ -134,8 +129,7 @@ async fn prefetch_claude_usage() -> (UsageCache, Option<Duration>) {
             };
             (profile, entry)
         })
-        .collect();
-    (cache, max_retry_after)
+        .collect()
 }
 
 /// Merge new Claude usage cache with old cache.
@@ -587,7 +581,7 @@ pub async fn cmd_dashboard() -> Result<()> {
             let mut should_render = false;
 
             tokio::select! {
-                (cache, _claude_retry) = &mut claude_future, if pending_tools.contains(&Tool::Claude) => {
+                cache = &mut claude_future, if pending_tools.contains(&Tool::Claude) => {
                     let merged = merge_claude_cache(cache, usage_caches.get(&Tool::Claude));
                     usage_caches.insert(Tool::Claude, merged);
                     pending_tools.remove(&Tool::Claude);
