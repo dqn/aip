@@ -54,7 +54,14 @@ fn spawn_key_reader() -> tokio::sync::mpsc::UnboundedReceiver<std::io::Result<Ke
     tokio::task::spawn_blocking(move || {
         let term = Term::stderr();
         loop {
-            let key = term.read_key();
+            let key =
+                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| term.read_key())) {
+                    Ok(result) => result,
+                    Err(_) => {
+                        eprintln!("key reader thread panicked");
+                        break;
+                    }
+                };
             if tx.send(key).is_err() {
                 break;
             }
@@ -614,6 +621,9 @@ pub async fn cmd_dashboard() -> Result<()> {
                     spinner_frame = spinner_frame.wrapping_add(1);
                     should_render = true;
                 }
+                _ = tokio::signal::ctrl_c() => {
+                    return Ok(());
+                }
                 Some(key_result) = key_rx.recv() => {
                     let key = match key_result {
                         Ok(k) => k,
@@ -692,6 +702,7 @@ pub async fn cmd_dashboard() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::codex::usage::RateWindow;
 
     fn build_lines(
         tool_profiles: &[(Tool, Vec<String>, Option<String>)],
@@ -1644,5 +1655,144 @@ mod tests {
         );
 
         assert!(!lines.iter().any(|l| l.contains("(stale)")));
+    }
+
+    // --- format_retry_after tests ---
+
+    #[test]
+    fn format_retry_after_minutes_and_seconds() {
+        let result = format_retry_after(Duration::from_secs(125));
+        assert_eq!(result, "Rate limited (resets in 2m 5s)");
+    }
+
+    #[test]
+    fn format_retry_after_seconds_only() {
+        let result = format_retry_after(Duration::from_secs(30));
+        assert_eq!(result, "Rate limited (resets in 30s)");
+    }
+
+    #[test]
+    fn format_retry_after_zero() {
+        let result = format_retry_after(Duration::from_secs(0));
+        assert_eq!(result, "Rate limited");
+    }
+
+    #[test]
+    fn format_retry_after_boundary_60s() {
+        let result = format_retry_after(Duration::from_secs(60));
+        assert_eq!(result, "Rate limited (resets in 1m 0s)");
+    }
+
+    // --- codex_usage_lines tests ---
+
+    #[test]
+    fn codex_usage_lines_with_both_windows() {
+        let limits = RateLimits {
+            primary: Some(RateWindow {
+                used_percent: 50.0,
+                resets_at: 1700000000,
+            }),
+            secondary: Some(RateWindow {
+                used_percent: 30.0,
+                resets_at: 1700100000,
+            }),
+        };
+        let lines = codex_usage_lines(Ok(Some(limits)));
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].contains("5-hour"));
+        assert!(lines[1].contains("Weekly"));
+    }
+
+    #[test]
+    fn codex_usage_lines_none_returns_no_data() {
+        let lines = codex_usage_lines(Ok(None));
+        assert_eq!(lines, vec!["No usage data available"]);
+    }
+
+    #[test]
+    fn codex_usage_lines_error_starts_with_error() {
+        let lines = codex_usage_lines(Err(anyhow::anyhow!("connection failed")));
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].starts_with("Error: "));
+        assert!(lines[0].contains("connection failed"));
+    }
+
+    // --- status_message rendering test ---
+
+    #[test]
+    fn build_dashboard_lines_shows_status_message_in_red_before_footer() {
+        let tool_profiles = vec![(
+            Tool::Claude,
+            vec!["personal".to_string()],
+            Some("personal".to_string()),
+        )];
+        let selectable_items = build_selectable_items(&tool_profiles);
+
+        let view = DashboardView {
+            tool_profiles: &tool_profiles,
+            usage_caches: &HashMap::new(),
+            pending_tools: &HashSet::new(),
+            selectable_items: &selectable_items,
+            selected: 0,
+            mode: &DashboardMode::Normal,
+            spinner_frame: 0,
+            status_message: Some("Failed to delete profile: not found"),
+        };
+        let lines = view.build_lines();
+
+        // Status message should appear in red (wrapped with \x1b[31m...\x1b[0m)
+        let status_line = lines
+            .iter()
+            .find(|l| l.contains("Failed to delete profile"))
+            .expect("status message should be present");
+        assert!(status_line.starts_with("\x1b[31m"));
+        assert!(status_line.ends_with("\x1b[0m"));
+
+        // Status message should appear before the footer (last line)
+        let footer = lines.last().unwrap();
+        assert!(footer.contains("Navigate"));
+        let status_idx = lines
+            .iter()
+            .position(|l| l.contains("Failed to delete"))
+            .unwrap();
+        let footer_idx = lines.len() - 1;
+        assert!(status_idx < footer_idx);
+    }
+
+    // --- delete-confirm 'y' test ---
+
+    #[test]
+    fn handle_dashboard_key_delete_confirm_y_captures_error_in_status_message() {
+        let tool_profiles = sample_tool_profiles();
+        let selectable_items = build_selectable_items(&tool_profiles);
+        let mut selected = 1; // "work" is NOT current for Claude
+        let mut mode = DashboardMode::DeleteConfirm(1);
+        let mut status_message: Option<String> = None;
+
+        let action = handle_dashboard_key(
+            Key::Char('y'),
+            &mut selected,
+            &mut mode,
+            &selectable_items,
+            &tool_profiles,
+            &mut status_message,
+        );
+
+        // delete_profile will fail in test environment (no real profile dirs),
+        // so the error is captured in status_message and mode resets to Normal.
+        assert!(matches!(mode, DashboardMode::Normal));
+        match action {
+            DashboardAction::Render => {
+                // Delete failed, error captured in status_message
+                let msg = status_message
+                    .as_ref()
+                    .expect("status_message should be set on failure");
+                assert!(msg.starts_with("Failed to delete profile: "));
+            }
+            DashboardAction::RefreshAfterDelete => {
+                // If the delete somehow succeeded (unlikely in test), that's fine too
+            }
+            _ => panic!("expected Render or RefreshAfterDelete, got other action"),
+        }
     }
 }
