@@ -57,10 +57,7 @@ fn spawn_key_reader() -> tokio::sync::mpsc::UnboundedReceiver<std::io::Result<Ke
             let key =
                 match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| term.read_key())) {
                     Ok(result) => result,
-                    Err(_) => {
-                        eprintln!("key reader thread panicked");
-                        break;
-                    }
+                    Err(_) => break,
                 };
             if tx.send(key).is_err() {
                 break;
@@ -517,14 +514,16 @@ fn handle_dashboard_key(
             let idx = *idx;
             match key {
                 Key::Char('y') => {
-                    let (tool, profile) = &selectable_items[idx];
                     *mode = DashboardMode::Normal;
-                    match tool.delete_profile(profile) {
-                        Ok(()) => DashboardAction::RefreshAfterDelete,
-                        Err(e) => {
-                            *status_message = Some(format!("Failed to delete profile: {}", e));
-                            DashboardAction::Render
-                        }
+                    match selectable_items.get(idx) {
+                        Some((tool, profile)) => match tool.delete_profile(profile) {
+                            Ok(()) => DashboardAction::RefreshAfterDelete,
+                            Err(e) => {
+                                *status_message = Some(format!("Failed to delete profile: {}", e));
+                                DashboardAction::Render
+                            }
+                        },
+                        None => DashboardAction::Render,
                     }
                 }
                 Key::Char('n') | Key::Escape => {
@@ -574,9 +573,12 @@ pub async fn cmd_dashboard() -> Result<()> {
     let mut mode = DashboardMode::Normal;
     let mut spinner_frame: usize = 0;
     let mut spinner_interval = tokio::time::interval(Duration::from_millis(80));
-    let mut status_message: Option<String> = None;
+    let mut status_message: Option<String>;
+    let ctrl_c_future = tokio::signal::ctrl_c();
+    tokio::pin!(ctrl_c_future);
 
     loop {
+        status_message = None;
         let tool_profiles = load_tool_profiles();
         let codex_profiles = get_codex_profiles(&tool_profiles);
         let selectable_items = build_selectable_items(&tool_profiles);
@@ -621,7 +623,7 @@ pub async fn cmd_dashboard() -> Result<()> {
                     spinner_frame = spinner_frame.wrapping_add(1);
                     should_render = true;
                 }
-                _ = tokio::signal::ctrl_c() => {
+                _ = &mut ctrl_c_future => {
                     return Ok(());
                 }
                 Some(key_result) = key_rx.recv() => {
@@ -652,18 +654,13 @@ pub async fn cmd_dashboard() -> Result<()> {
                                 // The current profile's token is managed by Claude Code.
                                 let current =
                                     Tool::Claude.current_profile().ok().flatten();
-                                if current.as_deref() != Some(profile.as_str())
-                                    && let Err(e) =
+                                if current.as_deref() != Some(profile.as_str()) {
+                                    let _ =
                                         claude::usage::refresh_credentials_if_expired(
                                             &dir.join("credentials.json"),
                                         )
-                                        .await
-                                    {
-                                        status_message = Some(format!(
-                                            "Warning: credential refresh failed, tokens may be expired: {}",
-                                            e,
-                                        ));
-                                    }
+                                        .await;
+                                }
                             }
                             match switch_profile(tool, profile) {
                                 Ok(()) => break,
