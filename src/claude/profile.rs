@@ -106,9 +106,13 @@ pub fn switch(profile: &str) -> Result<()> {
     let data = decode_hex_credentials(&raw);
     // Persist decoded credentials back to file if hex was decoded
     if data != raw {
-        let _ = fs_util::atomic_write(&src, &data);
+        if let Err(e) = fs_util::atomic_write(&src, &data) {
+            eprintln!("warning: failed to update credentials format: {e}");
+        }
         #[cfg(unix)]
-        let _ = fs::set_permissions(&src, fs::Permissions::from_mode(0o600));
+        if let Err(e) = fs::set_permissions(&src, fs::Permissions::from_mode(0o600)) {
+            eprintln!("warning: failed to set credentials file permissions: {e}");
+        }
     }
     write_keychain(&data)?;
 

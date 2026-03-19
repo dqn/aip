@@ -166,7 +166,7 @@ async fn get_access_token_from_credentials(
     path: &Path,
     is_current: bool,
 ) -> Result<(String, ProfileInfo)> {
-    let content = std::fs::read_to_string(path)?;
+    let content = tokio::fs::read_to_string(path).await?;
     let mut raw: Value = serde_json::from_str(&content)?;
     let oauth = read_oauth(&raw)?;
 
@@ -194,7 +194,7 @@ async fn get_access_token_from_credentials(
 }
 
 pub async fn refresh_credentials_if_expired(path: &Path) -> Result<String> {
-    let content = std::fs::read_to_string(path)?;
+    let content = tokio::fs::read_to_string(path).await?;
     let mut raw: Value = serde_json::from_str(&content)?;
     let oauth = read_oauth(&raw)?;
 
