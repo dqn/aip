@@ -32,6 +32,7 @@ enum DashboardAction {
     None,
     Render,
     Refresh,
+    RefreshAfterDelete,
     Switch(Tool, String),
     Quit,
 }
@@ -458,6 +459,7 @@ fn handle_dashboard_key(
     mode: &mut DashboardMode,
     selectable_items: &[(Tool, String)],
     tool_profiles: &[(Tool, Vec<String>, Option<String>)],
+    status_message: &mut Option<String>,
 ) -> DashboardAction {
     if selectable_items.is_empty() {
         return match key {
@@ -505,12 +507,13 @@ fn handle_dashboard_key(
             match key {
                 Key::Char('y') => {
                     let (tool, profile) = &selectable_items[idx];
-                    let result = tool.delete_profile(profile);
                     *mode = DashboardMode::Normal;
-                    if result.is_ok() {
-                        DashboardAction::Refresh
-                    } else {
-                        DashboardAction::Render
+                    match tool.delete_profile(profile) {
+                        Ok(()) => DashboardAction::RefreshAfterDelete,
+                        Err(e) => {
+                            *status_message = Some(format!("Failed to delete profile: {}", e));
+                            DashboardAction::Render
+                        }
                     }
                 }
                 Key::Char('n') | Key::Escape => {
@@ -619,9 +622,14 @@ pub async fn cmd_dashboard() -> Result<()> {
                         &mut mode,
                         &selectable_items,
                         &tool_profiles,
+                        &mut status_message,
                     ) {
                         DashboardAction::Quit => return Ok(()),
                         DashboardAction::Refresh => break,
+                        DashboardAction::RefreshAfterDelete => {
+                            selected = selected.saturating_sub(1);
+                            break;
+                        }
                         DashboardAction::Switch(tool, ref profile) => {
                             if tool == Tool::Claude
                                 && let Ok(dir) = Tool::Claude.profile_dir(profile)
@@ -1141,6 +1149,7 @@ mod tests {
             &mut mode,
             &selectable_items,
             &tool_profiles,
+            &mut None,
         );
         assert!(matches!(action, DashboardAction::Render));
         assert_eq!(selected, 1);
@@ -1151,6 +1160,7 @@ mod tests {
             &mut mode,
             &selectable_items,
             &tool_profiles,
+            &mut None,
         );
         assert!(matches!(action, DashboardAction::Render));
         assert_eq!(selected, 0);
@@ -1169,6 +1179,7 @@ mod tests {
             &mut mode,
             &selectable_items,
             &tool_profiles,
+            &mut None,
         );
         assert_eq!(selected, 0);
 
@@ -1179,6 +1190,7 @@ mod tests {
             &mut mode,
             &selectable_items,
             &tool_profiles,
+            &mut None,
         );
         assert_eq!(selected, selectable_items.len() - 1);
     }
@@ -1196,6 +1208,7 @@ mod tests {
             &mut mode,
             &selectable_items,
             &tool_profiles,
+            &mut None,
         );
         assert!(matches!(action, DashboardAction::None));
     }
@@ -1213,6 +1226,7 @@ mod tests {
             &mut mode,
             &selectable_items,
             &tool_profiles,
+            &mut None,
         );
         assert!(matches!(action, DashboardAction::None));
     }
@@ -1230,6 +1244,7 @@ mod tests {
             &mut mode,
             &selectable_items,
             &tool_profiles,
+            &mut None,
         );
         assert!(matches!(action, DashboardAction::Render));
         assert!(matches!(mode, DashboardMode::DeleteConfirm(1)));
@@ -1248,6 +1263,7 @@ mod tests {
             &mut mode,
             &selectable_items,
             &tool_profiles,
+            &mut None,
         );
         assert!(matches!(action, DashboardAction::Quit));
     }
@@ -1265,6 +1281,7 @@ mod tests {
             &mut mode,
             &selectable_items,
             &tool_profiles,
+            &mut None,
         );
         assert!(matches!(action, DashboardAction::Quit));
     }
@@ -1282,6 +1299,7 @@ mod tests {
             &mut mode,
             &selectable_items,
             &tool_profiles,
+            &mut None,
         );
         assert!(matches!(action, DashboardAction::Render));
         assert!(matches!(mode, DashboardMode::Normal));
@@ -1300,6 +1318,7 @@ mod tests {
             &mut mode,
             &selectable_items,
             &tool_profiles,
+            &mut None,
         );
         assert!(matches!(action, DashboardAction::Render));
         assert!(matches!(mode, DashboardMode::Normal));
@@ -1362,6 +1381,7 @@ mod tests {
             &mut mode,
             &selectable_items,
             &tool_profiles,
+            &mut None,
         );
         // handle_move calls save_profile_order which may fail in test env,
         // but selected should still be updated on success (Reload) or unchanged (None).
@@ -1384,6 +1404,7 @@ mod tests {
             &mut mode,
             &selectable_items,
             &tool_profiles,
+            &mut None,
         );
         match action {
             DashboardAction::Refresh => assert_eq!(selected, 0),
@@ -1404,6 +1425,7 @@ mod tests {
             &mut mode,
             &selectable_items,
             &tool_profiles,
+            &mut None,
         );
         assert!(matches!(action, DashboardAction::Refresh));
     }
@@ -1421,6 +1443,7 @@ mod tests {
             &mut mode,
             &selectable_items,
             &tool_profiles,
+            &mut None,
         );
         assert!(matches!(action, DashboardAction::Quit));
 
@@ -1430,6 +1453,7 @@ mod tests {
             &mut mode,
             &selectable_items,
             &tool_profiles,
+            &mut None,
         );
         assert!(matches!(action, DashboardAction::None));
     }
@@ -1447,6 +1471,7 @@ mod tests {
             &mut mode,
             &selectable_items,
             &tool_profiles,
+            &mut None,
         );
         assert!(matches!(action, DashboardAction::Refresh));
     }

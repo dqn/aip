@@ -76,6 +76,16 @@ impl Tool {
         }
 
         std::fs::remove_dir_all(&profile_dir)?;
+
+        // Clean up _order file to remove the deleted profile name.
+        let order_file = self.order_file()?;
+        if order_file.exists()
+            && let Ok(content) = std::fs::read_to_string(&order_file)
+        {
+            let filtered: Vec<&str> = content.lines().filter(|line| line.trim() != name).collect();
+            let _ = fs_util::atomic_write(&order_file, &(filtered.join("\n") + "\n"));
+        }
+
         Ok(())
     }
 
