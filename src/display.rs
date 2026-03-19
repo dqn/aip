@@ -135,4 +135,21 @@ mod tests {
         let result = format_reset_time(far_future);
         assert!(result.contains("Dec 31"));
     }
+
+    #[test]
+    fn format_usage_line_left_mode_shows_remaining_percent() {
+        let line = format_usage_line("5-hour", 70.0, None, &DisplayMode::Left);
+
+        // 100.0 - 70.0 = 30.0% left
+        assert!(line.contains("30.0%"));
+        assert!(line.contains("left"));
+    }
+
+    #[test]
+    fn format_usage_line_used_mode_shows_used_percent() {
+        let line = format_usage_line("5-hour", 60.0, None, &DisplayMode::Used);
+
+        assert!(line.contains("60.0%"));
+        assert!(line.contains("used"));
+    }
 }
