@@ -188,7 +188,8 @@ async fn get_access_token_from_credentials(
     let access_token = token_resp.access_token.clone();
     apply_token_response(&mut raw, &token_resp)?;
     let new_content = serde_json::to_string_pretty(&raw)?;
-    fs_util::atomic_write(path, &new_content)?;
+    let path = path.to_owned();
+    tokio::task::spawn_blocking(move || fs_util::atomic_write(&path, &new_content)).await??;
 
     Ok((access_token, info))
 }
@@ -205,7 +206,9 @@ pub async fn refresh_credentials_if_expired(path: &Path) -> Result<String> {
     let token_resp = refresh_token(&oauth).await?;
     apply_token_response(&mut raw, &token_resp)?;
     let refreshed = serde_json::to_string_pretty(&raw)?;
-    fs_util::atomic_write(path, &refreshed)?;
+    let path = path.to_owned();
+    let write_content = refreshed.clone();
+    tokio::task::spawn_blocking(move || fs_util::atomic_write(&path, &write_content)).await??;
     Ok(refreshed)
 }
 

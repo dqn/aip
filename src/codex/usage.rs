@@ -63,8 +63,8 @@ fn read_tokens(raw: &Value) -> Result<TokenData> {
     Ok(serde_json::from_value(tokens_value.clone())?)
 }
 
-fn read_auth(path: &Path) -> Result<(Value, TokenData)> {
-    let content = std::fs::read_to_string(path)?;
+async fn read_auth(path: &Path) -> Result<(Value, TokenData)> {
+    let content = tokio::fs::read_to_string(path).await?;
     let raw: Value = serde_json::from_str(&content)?;
     let tokens = read_tokens(&raw)?;
     Ok((raw, tokens))
@@ -134,7 +134,7 @@ async fn parse_usage_response(resp: reqwest::Response) -> Result<Option<RateLimi
 }
 
 async fn fetch_from_auth_path(path: &Path) -> Result<Option<RateLimits>> {
-    let (mut raw, tokens) = read_auth(path)?;
+    let (mut raw, tokens) = read_auth(path).await?;
 
     let resp = fetch_usage_api(&tokens).await?;
 
@@ -155,7 +155,9 @@ async fn fetch_from_auth_path(path: &Path) -> Result<Option<RateLimits>> {
         return Err(anyhow!("token refresh returned the same access token"));
     }
 
-    fs_util::atomic_write(path, &serde_json::to_string_pretty(&raw)?)?;
+    let path = path.to_owned();
+    let serialized = serde_json::to_string_pretty(&raw)?;
+    tokio::task::spawn_blocking(move || fs_util::atomic_write(&path, &serialized)).await??;
 
     let new_tokens = read_tokens(&raw)?;
     let resp = fetch_usage_api(&new_tokens).await?;
