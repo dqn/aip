@@ -176,8 +176,8 @@ async fn get_access_token_from_credentials(
 
     // For the current profile, always use the token as-is. aip is read-only
     // for the current profile; if the token is actually expired server-side,
-    // the usage API will return 429+retry-after:0 and refresh_stale_token
-    // will re-read from Keychain where Claude Code may have refreshed it.
+    // the usage API will return 429+retry-after:0, which triggers stale-cache
+    // preservation. The user can manually refresh with 'r'.
     if is_current || !is_token_expired(&oauth) {
         return Ok((oauth.access_token, info));
     }

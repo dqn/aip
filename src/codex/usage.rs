@@ -93,18 +93,20 @@ async fn do_refresh_token(refresh_token: &str) -> Result<RefreshResponse> {
     Ok(resp.json().await?)
 }
 
-fn apply_refresh(raw: &mut Value, resp: &RefreshResponse) {
-    if let Some(tokens) = raw.get_mut("tokens") {
-        if let Some(new_access) = &resp.access_token {
-            tokens["access_token"] = Value::String(new_access.clone());
-        }
-        if let Some(new_refresh) = &resp.refresh_token {
-            tokens["refresh_token"] = Value::String(new_refresh.clone());
-        }
-        if let Some(new_id) = &resp.id_token {
-            tokens["id_token"] = Value::String(new_id.clone());
-        }
+fn apply_refresh(raw: &mut Value, resp: &RefreshResponse) -> Result<()> {
+    let tokens = raw
+        .get_mut("tokens")
+        .ok_or_else(|| anyhow!("malformed auth.json: missing 'tokens' key"))?;
+    if let Some(new_access) = &resp.access_token {
+        tokens["access_token"] = Value::String(new_access.clone());
     }
+    if let Some(new_refresh) = &resp.refresh_token {
+        tokens["refresh_token"] = Value::String(new_refresh.clone());
+    }
+    if let Some(new_id) = &resp.id_token {
+        tokens["id_token"] = Value::String(new_id.clone());
+    }
+    Ok(())
 }
 
 async fn fetch_usage_api(tokens: &TokenData) -> Result<reqwest::Response> {
@@ -143,7 +145,7 @@ async fn fetch_from_auth_path(path: &Path) -> Result<Option<RateLimits>> {
 
     // Token expired, try refreshing
     let refresh_resp = do_refresh_token(&tokens.refresh_token).await?;
-    apply_refresh(&mut raw, &refresh_resp);
+    apply_refresh(&mut raw, &refresh_resp)?;
 
     let new_access_token = refresh_resp
         .access_token
