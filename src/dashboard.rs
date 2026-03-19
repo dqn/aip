@@ -123,7 +123,7 @@ async fn prefetch_claude_usage() -> UsageCache {
                         ProfileUsageCache {
                             lines: vec![format!("Error: {}", e)],
                             plan_type: None,
-                            is_stale: false,
+                            is_stale: true,
                         }
                     }
                 }
@@ -194,6 +194,10 @@ fn codex_usage_lines(result: Result<Option<RateLimits>>) -> Vec<String> {
 }
 
 async fn prefetch_codex_usage(profiles: &[String]) -> UsageCache {
+    // Sync active auth.json to current profile before fetching usage,
+    // analogous to sync_keychain_to_current_profile for Claude.
+    let _ = tokio::task::spawn_blocking(codex::profile::sync_auth_to_current_profile).await;
+
     let current = Tool::Codex.current_profile().ok().flatten();
 
     let mut handles = Vec::new();
@@ -638,13 +642,18 @@ pub async fn cmd_dashboard() -> Result<()> {
                                 // The current profile's token is managed by Claude Code.
                                 let current =
                                     Tool::Claude.current_profile().ok().flatten();
-                                if current.as_deref() != Some(profile.as_str()) {
-                                    let _ =
+                                if current.as_deref() != Some(profile.as_str())
+                                    && let Err(e) =
                                         claude::usage::refresh_credentials_if_expired(
                                             &dir.join("credentials.json"),
                                         )
-                                        .await;
-                                }
+                                        .await
+                                    {
+                                        status_message = Some(format!(
+                                            "Warning: credential refresh failed, tokens may be expired: {}",
+                                            e,
+                                        ));
+                                    }
                             }
                             match switch_profile(tool, profile) {
                                 Ok(()) => break,

@@ -37,7 +37,7 @@ pub fn switch(profile: &str) -> Result<()> {
     Ok(())
 }
 
-fn sync_auth_to_current_profile() {
+pub fn sync_auth_to_current_profile() {
     let current = match TOOL.current_profile() {
         Ok(Some(name)) => name,
         _ => return,
