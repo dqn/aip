@@ -280,6 +280,7 @@ struct DashboardView<'a> {
     selected: usize,
     mode: &'a DashboardMode,
     spinner_frame: usize,
+    status_message: Option<&'a str>,
 }
 
 impl DashboardView<'_> {
@@ -351,6 +352,11 @@ impl DashboardView<'_> {
                 }
             }
 
+            lines.push(String::new());
+        }
+
+        if let Some(msg) = self.status_message {
+            lines.push(format!("\x1b[31m{}\x1b[0m", msg));
             lines.push(String::new());
         }
 
@@ -455,6 +461,7 @@ fn handle_dashboard_key(
 ) -> DashboardAction {
     if selectable_items.is_empty() {
         return match key {
+            Key::Char('r') => DashboardAction::Refresh,
             Key::Escape | Key::Char('q') => DashboardAction::Quit,
             _ => DashboardAction::None,
         };
@@ -526,6 +533,7 @@ fn render_dashboard(
     selected: usize,
     mode: &DashboardMode,
     spinner_frame: usize,
+    status_message: Option<&str>,
 ) -> Result<()> {
     DashboardView {
         tool_profiles,
@@ -535,6 +543,7 @@ fn render_dashboard(
         selected,
         mode,
         spinner_frame,
+        status_message,
     }
     .render(term)
 }
@@ -551,6 +560,7 @@ pub async fn cmd_dashboard() -> Result<()> {
     let mut mode = DashboardMode::Normal;
     let mut spinner_frame: usize = 0;
     let mut spinner_interval = tokio::time::interval(Duration::from_millis(80));
+    let mut status_message: Option<String> = None;
 
     loop {
         let tool_profiles = load_tool_profiles();
@@ -575,6 +585,7 @@ pub async fn cmd_dashboard() -> Result<()> {
             selected,
             &mode,
             spinner_frame,
+            status_message.as_deref(),
         )?;
 
         loop {
@@ -601,6 +612,7 @@ pub async fn cmd_dashboard() -> Result<()> {
                         Ok(k) => k,
                         Err(_) => continue,
                     };
+                    status_message = None;
                     match handle_dashboard_key(
                         key,
                         &mut selected,
@@ -626,8 +638,15 @@ pub async fn cmd_dashboard() -> Result<()> {
                                         .await;
                                 }
                             }
-                            if switch_profile(tool, profile).is_ok() {
-                                break;
+                            match switch_profile(tool, profile) {
+                                Ok(()) => break,
+                                Err(e) => {
+                                    status_message = Some(format!(
+                                        "Failed to switch profile: {}",
+                                        e,
+                                    ));
+                                    should_render = true;
+                                }
                             }
                         }
                         DashboardAction::Render => should_render = true,
@@ -646,6 +665,7 @@ pub async fn cmd_dashboard() -> Result<()> {
                     selected,
                     &mode,
                     spinner_frame,
+                    status_message.as_deref(),
                 )?;
             }
         }
@@ -673,6 +693,7 @@ mod tests {
             selected,
             mode,
             spinner_frame,
+            status_message: None,
         }
         .build_lines()
     }
@@ -1411,6 +1432,23 @@ mod tests {
             &tool_profiles,
         );
         assert!(matches!(action, DashboardAction::None));
+    }
+
+    #[test]
+    fn handle_dashboard_key_refreshes_when_no_selectable_items() {
+        let tool_profiles = vec![(Tool::Claude, vec![], None)];
+        let selectable_items = build_selectable_items(&tool_profiles);
+        let mut selected = 0;
+        let mut mode = DashboardMode::Normal;
+
+        let action = handle_dashboard_key(
+            Key::Char('r'),
+            &mut selected,
+            &mut mode,
+            &selectable_items,
+            &tool_profiles,
+        );
+        assert!(matches!(action, DashboardAction::Refresh));
     }
 
     #[test]
