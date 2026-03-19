@@ -119,7 +119,7 @@ fn apply_token_response(raw: &mut Value, token_resp: &TokenResponse) -> Result<(
     if let Some(new_refresh) = &token_resp.refresh_token {
         oauth["refreshToken"] = Value::String(new_refresh.clone());
     }
-    let expires_in = token_resp.expires_in.unwrap_or(3600).min(86400);
+    let expires_in = token_resp.expires_in.unwrap_or(3600).clamp(60, 86400);
     let now_ms = Utc::now().timestamp_millis().max(0) as u64;
     let new_expires_at = now_ms + expires_in.saturating_mul(1000);
     oauth["expiresAt"] = Value::Number(new_expires_at.into());
