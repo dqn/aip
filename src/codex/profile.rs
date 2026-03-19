@@ -20,10 +20,15 @@ pub fn switch(profile: &str) -> Result<()> {
 
     // Load new profile's auth.json to root (atomic write before updating _current)
     let src = profile_dir.join("auth.json");
-    if src.exists() {
-        let dest = TOOL.home_dir()?.join("auth.json");
-        fs_util::atomic_copy(&src, &dest)?;
+    if !src.exists() {
+        return Err(anyhow!(
+            "credentials file not found for profile '{}' ({})",
+            profile,
+            TOOL
+        ));
     }
+    let dest = TOOL.home_dir()?.join("auth.json");
+    fs_util::atomic_copy(&src, &dest)?;
 
     // Update _current file (atomic write)
     let current_file = TOOL.current_file()?;
@@ -94,10 +99,13 @@ pub fn save(name: &str) -> Result<()> {
     }
 
     let dest_dir = TOOL.profile_dir(name)?;
+    let newly_created = !dest_dir.exists();
     fs::create_dir_all(&dest_dir)?;
     let dest_path = dest_dir.join("auth.json");
     if let Err(e) = fs::copy(&src, &dest_path) {
-        let _ = fs::remove_dir_all(&dest_dir);
+        if newly_created {
+            let _ = fs::remove_dir_all(&dest_dir);
+        }
         return Err(e.into());
     }
     #[cfg(unix)]

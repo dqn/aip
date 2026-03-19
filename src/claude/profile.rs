@@ -98,17 +98,22 @@ pub fn switch(profile: &str) -> Result<()> {
 
     // Load new profile's credentials into Keychain
     let src = profile_dir.join("credentials.json");
-    if src.exists() {
-        let raw = fs::read_to_string(&src)?;
-        let data = decode_hex_credentials(&raw);
-        // Persist decoded credentials back to file if hex was decoded
-        if data != raw {
-            let _ = fs_util::atomic_write(&src, &data);
-            #[cfg(unix)]
-            let _ = fs::set_permissions(&src, fs::Permissions::from_mode(0o600));
-        }
-        write_keychain(&data)?;
+    if !src.exists() {
+        return Err(anyhow!(
+            "credentials file not found for profile '{}' ({})",
+            profile,
+            TOOL
+        ));
     }
+    let raw = fs::read_to_string(&src)?;
+    let data = decode_hex_credentials(&raw);
+    // Persist decoded credentials back to file if hex was decoded
+    if data != raw {
+        let _ = fs_util::atomic_write(&src, &data);
+        #[cfg(unix)]
+        let _ = fs::set_permissions(&src, fs::Permissions::from_mode(0o600));
+    }
+    write_keychain(&data)?;
 
     // Update _current file
     let current_file = TOOL.current_file()?;
@@ -195,7 +200,7 @@ pub fn save(name: &str) -> Result<()> {
     let dest_dir = TOOL.profile_dir(name)?;
     fs::create_dir_all(&dest_dir)?;
     let creds_path = dest_dir.join("credentials.json");
-    fs::write(&creds_path, &data)?;
+    fs_util::atomic_write(&creds_path, &data)?;
     #[cfg(unix)]
     fs::set_permissions(&creds_path, fs::Permissions::from_mode(0o600))?;
 
