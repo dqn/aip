@@ -31,12 +31,13 @@ pub struct RateLimits {
 pub struct RateWindow {
     pub used_percent: f64,
     #[serde(rename = "reset_at")]
-    pub resets_at: i64,
+    pub resets_at: Option<i64>,
 }
 
 impl RateWindow {
     pub fn resets_at_utc(&self) -> Option<DateTime<Utc>> {
-        DateTime::from_timestamp(self.resets_at, 0)
+        self.resets_at
+            .and_then(|ts| DateTime::from_timestamp(ts, 0))
     }
 }
 
@@ -251,5 +252,22 @@ mod tests {
 
         let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "credential file should be owner-only (0o600)");
+    }
+
+    #[test]
+    fn deserialize_rate_window_with_null_reset_at() {
+        let json = r#"{"used_percent": 42.0, "reset_at": null}"#;
+        let window: RateWindow = serde_json::from_str(json).unwrap();
+        assert_eq!(window.used_percent, 42.0);
+        assert!(window.resets_at.is_none());
+        assert!(window.resets_at_utc().is_none());
+    }
+
+    #[test]
+    fn deserialize_rate_window_with_valid_reset_at() {
+        let json = r#"{"used_percent": 10.0, "reset_at": 1700000000}"#;
+        let window: RateWindow = serde_json::from_str(json).unwrap();
+        assert_eq!(window.resets_at, Some(1700000000));
+        assert!(window.resets_at_utc().is_some());
     }
 }
