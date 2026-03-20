@@ -3,6 +3,14 @@ use std::path::Path;
 
 use anyhow::Result;
 
+/// Atomically writes to `path` by first preparing a temporary file, then renaming it.
+///
+/// # Single-writer assumption
+///
+/// The temporary file name is derived deterministically from `path` (same path with a `.tmp`
+/// extension). Concurrent callers targeting the same `path` will race on the same temporary
+/// file, causing data corruption or spurious errors. Callers must ensure that at most one
+/// writer targets a given `path` at any time.
 fn with_tmp_rename<F>(path: &Path, prepare: F) -> Result<()>
 where
     F: FnOnce(&Path) -> std::io::Result<()>,

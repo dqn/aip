@@ -45,7 +45,7 @@ struct UsageResponse {
 #[derive(Debug, Deserialize)]
 struct TokenData {
     access_token: String,
-    refresh_token: String,
+    refresh_token: Option<String>,
     account_id: Option<String>,
 }
 
@@ -144,7 +144,11 @@ async fn fetch_from_auth_path(path: &Path) -> Result<Option<RateLimits>> {
     }
 
     // Token expired, try refreshing
-    let refresh_resp = do_refresh_token(&tokens.refresh_token).await?;
+    let refresh_token = tokens
+        .refresh_token
+        .as_deref()
+        .ok_or_else(|| anyhow!("auth.json does not contain a refresh_token"))?;
+    let refresh_resp = do_refresh_token(refresh_token).await?;
     apply_refresh(&mut raw, &refresh_resp)?;
 
     let new_access_token = refresh_resp
@@ -177,4 +181,51 @@ pub async fn fetch_usage_from_auth(path: &Path) -> Result<Option<RateLimits>> {
         return Ok(None);
     }
     fetch_from_auth_path(path).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn read_tokens_with_refresh_token() {
+        let raw: Value = serde_json::json!({
+            "tokens": {
+                "access_token": "acc",
+                "refresh_token": "ref",
+            }
+        });
+        let tokens = read_tokens(&raw).unwrap();
+        assert_eq!(tokens.access_token, "acc");
+        assert_eq!(tokens.refresh_token.as_deref(), Some("ref"));
+    }
+
+    #[test]
+    fn read_tokens_without_refresh_token() {
+        let raw: Value = serde_json::json!({
+            "tokens": {
+                "access_token": "acc",
+            }
+        });
+        let tokens = read_tokens(&raw).unwrap();
+        assert_eq!(tokens.access_token, "acc");
+        assert!(tokens.refresh_token.is_none());
+    }
+
+    #[test]
+    fn read_tokens_missing_access_token_fails() {
+        let raw: Value = serde_json::json!({
+            "tokens": {
+                "refresh_token": "ref",
+            }
+        });
+        assert!(read_tokens(&raw).is_err());
+    }
+
+    #[test]
+    fn read_tokens_missing_tokens_key_fails() {
+        let raw: Value = serde_json::json!({});
+        let err = read_tokens(&raw).unwrap_err();
+        assert!(err.to_string().contains("no tokens in auth.json"));
+    }
 }
