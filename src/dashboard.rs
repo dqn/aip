@@ -707,7 +707,12 @@ pub async fn cmd_dashboard() -> Result<()> {
                                         .await;
                                 }
                             }
-                            match switch_profile(tool, profile) {
+                            let profile = profile.clone();
+                            match tokio::task::spawn_blocking(move || {
+                                switch_profile(tool, &profile)
+                            })
+                            .await?
+                            {
                                 Ok(()) => break,
                                 Err(e) => {
                                     status_message = Some(format!(
