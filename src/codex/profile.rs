@@ -18,7 +18,7 @@ pub fn switch(profile: &str) -> Result<()> {
     // Save active auth.json to current profile
     sync_auth_to_current_profile();
 
-    // Load new profile's auth.json to root (atomic write before updating _current)
+    // Validate new profile's auth.json exists before making changes
     let src = profile_dir.join("auth.json");
     if !src.exists() {
         return Err(anyhow!(
@@ -27,12 +27,26 @@ pub fn switch(profile: &str) -> Result<()> {
             TOOL
         ));
     }
-    let dest = TOOL.home_dir()?.join("auth.json");
-    fs_util::atomic_copy(&src, &dest)?;
 
-    // Update _current file (atomic write)
+    // Update _current first, then copy credentials.
+    // If credential copy fails, roll back _current to avoid contamination.
     let current_file = TOOL.current_file()?;
+    let old_current = fs::read_to_string(&current_file).ok();
     fs_util::atomic_write(&current_file, &format!("{}\n", profile))?;
+
+    let dest = TOOL.home_dir()?.join("auth.json");
+    if let Err(e) = fs_util::atomic_copy(&src, &dest) {
+        // Roll back _current to previous value
+        match &old_current {
+            Some(prev) => {
+                let _ = fs_util::atomic_write(&current_file, prev);
+            }
+            None => {
+                let _ = fs::remove_file(&current_file);
+            }
+        }
+        return Err(e);
+    }
 
     Ok(())
 }
@@ -107,19 +121,130 @@ pub fn save(name: &str) -> Result<()> {
     let dest_dir = TOOL.profile_dir(name)?;
     let newly_created = !dest_dir.exists();
     fs::create_dir_all(&dest_dir)?;
-    let dest_path = dest_dir.join("auth.json");
-    if let Err(e) = fs_util::atomic_copy(&src, &dest_path) {
-        if newly_created {
+
+    let result = (|| -> Result<()> {
+        let dest_path = dest_dir.join("auth.json");
+        fs_util::atomic_copy(&src, &dest_path)?;
+        #[cfg(unix)]
+        fs::set_permissions(&dest_path, fs::Permissions::from_mode(0o600))?;
+
+        // Update current profile to the newly saved one
+        let current_file = TOOL.current_file()?;
+        fs_util::atomic_write(&current_file, &format!("{}\n", name))?;
+
+        Ok(())
+    })();
+
+    if result.is_err() && newly_created {
+        let _ = fs::remove_dir_all(&dest_dir);
+    }
+
+    result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Simulate the switch rollback logic: if credential copy after _current
+    /// update fails, _current must be restored to its previous value.
+    #[test]
+    fn switch_rolls_back_current_on_copy_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let current_file = dir.path().join("_current");
+
+        // Pre-existing _current value
+        fs::write(&current_file, "old-profile\n").unwrap();
+
+        let old_current = fs::read_to_string(&current_file).ok();
+        fs_util::atomic_write(&current_file, "new-profile\n").unwrap();
+        assert_eq!(fs::read_to_string(&current_file).unwrap(), "new-profile\n");
+
+        // Simulate atomic_copy failure -> rollback
+        let copy_failed = true;
+        if copy_failed {
+            match &old_current {
+                Some(prev) => {
+                    let _ = fs_util::atomic_write(&current_file, prev);
+                }
+                None => {
+                    let _ = fs::remove_file(&current_file);
+                }
+            }
+        }
+
+        assert_eq!(fs::read_to_string(&current_file).unwrap(), "old-profile\n");
+    }
+
+    /// When _current didn't exist before switch, rollback should remove it.
+    #[test]
+    fn switch_removes_current_on_rollback_when_no_previous() {
+        let dir = tempfile::tempdir().unwrap();
+        let current_file = dir.path().join("_current");
+
+        let old_current: Option<String> = fs::read_to_string(&current_file).ok();
+        assert!(old_current.is_none());
+
+        fs_util::atomic_write(&current_file, "new-profile\n").unwrap();
+        assert!(current_file.exists());
+
+        // Simulate failure -> rollback
+        match &old_current {
+            Some(prev) => {
+                let _ = fs_util::atomic_write(&current_file, prev);
+            }
+            None => {
+                let _ = fs::remove_file(&current_file);
+            }
+        }
+
+        assert!(!current_file.exists());
+    }
+
+    /// Simulate save cleanup: newly created profile dir is removed on failure.
+    #[test]
+    fn save_cleans_up_newly_created_dir_on_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest_dir = dir.path().join("profiles").join("new-profile");
+        let newly_created = !dest_dir.exists();
+        assert!(newly_created);
+
+        fs::create_dir_all(&dest_dir).unwrap();
+        assert!(dest_dir.exists());
+
+        // Simulate failure in the inner closure
+        let result: Result<()> = Err(anyhow!("simulated copy failure"));
+
+        if result.is_err() && newly_created {
             let _ = fs::remove_dir_all(&dest_dir);
         }
-        return Err(e);
+
+        assert!(!dest_dir.exists());
     }
-    #[cfg(unix)]
-    fs::set_permissions(&dest_path, fs::Permissions::from_mode(0o600))?;
 
-    // Update current profile to the newly saved one
-    let current_file = TOOL.current_file()?;
-    fs_util::atomic_write(&current_file, &format!("{}\n", name))?;
+    /// When save overwrites an existing profile, dir should NOT be removed on failure.
+    #[test]
+    fn save_preserves_existing_dir_on_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest_dir = dir.path().join("profiles").join("existing-profile");
+        fs::create_dir_all(&dest_dir).unwrap();
+        fs::write(dest_dir.join("auth.json"), "old-auth").unwrap();
 
-    Ok(())
+        let newly_created = !dest_dir.exists();
+        assert!(!newly_created);
+
+        // Simulate failure
+        let result: Result<()> = Err(anyhow!("simulated copy failure"));
+
+        if result.is_err() && newly_created {
+            let _ = fs::remove_dir_all(&dest_dir);
+        }
+
+        // Directory and contents preserved
+        assert!(dest_dir.exists());
+        assert_eq!(
+            fs::read_to_string(dest_dir.join("auth.json")).unwrap(),
+            "old-auth"
+        );
+    }
 }

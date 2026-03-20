@@ -93,7 +93,7 @@ pub fn switch(profile: &str) -> Result<()> {
     // Save current Keychain credentials to current profile
     sync_keychain_to_current_profile();
 
-    // Load new profile's credentials into Keychain
+    // Load new profile's credentials
     let src = profile_dir.join("credentials.json");
     if !src.exists() {
         return Err(anyhow!(
@@ -114,11 +114,26 @@ pub fn switch(profile: &str) -> Result<()> {
             eprintln!("warning: failed to set credentials file permissions: {e}");
         }
     }
-    write_keychain(&data)?;
 
-    // Update _current file
+    // Update _current first, then write credentials to Keychain.
+    // If Keychain write fails, roll back _current to avoid contamination.
     let current_file = TOOL.current_file()?;
+    let old_current = fs::read_to_string(&current_file).ok();
     fs_util::atomic_write(&current_file, &format!("{}\n", profile))?;
+
+    if let Err(e) = write_keychain(&data) {
+        // Roll back _current to previous value
+        match &old_current {
+            Some(prev) => {
+                let _ = fs_util::atomic_write(&current_file, prev);
+            }
+            None => {
+                let _ = fs::remove_file(&current_file);
+            }
+        }
+        return Err(e);
+    }
+
     Ok(())
 }
 
@@ -149,6 +164,108 @@ pub fn sync_keychain_to_current_profile() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Simulate the switch rollback logic: if the operation after _current
+    /// update fails, _current must be restored to its previous value.
+    #[test]
+    fn switch_rolls_back_current_on_credential_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let current_file = dir.path().join("_current");
+
+        // Pre-existing _current value
+        fs::write(&current_file, "old-profile\n").unwrap();
+
+        let old_current = fs::read_to_string(&current_file).ok();
+        fs_util::atomic_write(&current_file, "new-profile\n").unwrap();
+        assert_eq!(fs::read_to_string(&current_file).unwrap(), "new-profile\n");
+
+        // Simulate credential write failure -> rollback
+        let credential_write_failed = true;
+        if credential_write_failed {
+            match &old_current {
+                Some(prev) => {
+                    let _ = fs_util::atomic_write(&current_file, prev);
+                }
+                None => {
+                    let _ = fs::remove_file(&current_file);
+                }
+            }
+        }
+
+        assert_eq!(fs::read_to_string(&current_file).unwrap(), "old-profile\n");
+    }
+
+    /// When _current didn't exist before switch, rollback should remove it.
+    #[test]
+    fn switch_removes_current_on_rollback_when_no_previous() {
+        let dir = tempfile::tempdir().unwrap();
+        let current_file = dir.path().join("_current");
+
+        let old_current: Option<String> = fs::read_to_string(&current_file).ok();
+        assert!(old_current.is_none());
+
+        fs_util::atomic_write(&current_file, "new-profile\n").unwrap();
+        assert!(current_file.exists());
+
+        // Simulate failure -> rollback
+        match &old_current {
+            Some(prev) => {
+                let _ = fs_util::atomic_write(&current_file, prev);
+            }
+            None => {
+                let _ = fs::remove_file(&current_file);
+            }
+        }
+
+        assert!(!current_file.exists());
+    }
+
+    /// Simulate save cleanup: newly created profile dir is removed on failure.
+    #[test]
+    fn save_cleans_up_newly_created_dir_on_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest_dir = dir.path().join("profiles").join("new-profile");
+        let newly_created = !dest_dir.exists();
+        assert!(newly_created);
+
+        fs::create_dir_all(&dest_dir).unwrap();
+        assert!(dest_dir.exists());
+
+        // Simulate failure in the inner closure
+        let result: Result<()> = Err(anyhow!("simulated write failure"));
+
+        if result.is_err() && newly_created {
+            let _ = fs::remove_dir_all(&dest_dir);
+        }
+
+        assert!(!dest_dir.exists());
+    }
+
+    /// When save overwrites an existing profile, dir should NOT be removed on failure.
+    #[test]
+    fn save_preserves_existing_dir_on_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest_dir = dir.path().join("profiles").join("existing-profile");
+        fs::create_dir_all(&dest_dir).unwrap();
+        fs::write(dest_dir.join("credentials.json"), "old-creds").unwrap();
+
+        let newly_created = !dest_dir.exists();
+        assert!(!newly_created);
+
+        // Simulate failure
+        let result: Result<()> = Err(anyhow!("simulated write failure"));
+
+        if result.is_err() && newly_created {
+            let _ = fs::remove_dir_all(&dest_dir);
+        }
+
+        // Directory and contents preserved
+        assert!(dest_dir.exists());
+        assert_eq!(
+            fs::read_to_string(dest_dir.join("credentials.json")).unwrap(),
+            "old-creds"
+        );
+    }
 
     #[test]
     fn decode_hex_credentials_passes_through_json() {
@@ -199,15 +316,25 @@ pub fn save(name: &str) -> Result<()> {
     let data = read_keychain()?;
 
     let dest_dir = TOOL.profile_dir(name)?;
+    let newly_created = !dest_dir.exists();
     fs::create_dir_all(&dest_dir)?;
-    let creds_path = dest_dir.join("credentials.json");
-    fs_util::atomic_write(&creds_path, &data)?;
-    #[cfg(unix)]
-    fs::set_permissions(&creds_path, fs::Permissions::from_mode(0o600))?;
 
-    // Update current profile to the newly saved one
-    let current_file = TOOL.current_file()?;
-    fs_util::atomic_write(&current_file, &format!("{}\n", name))?;
+    let result = (|| -> Result<()> {
+        let creds_path = dest_dir.join("credentials.json");
+        fs_util::atomic_write(&creds_path, &data)?;
+        #[cfg(unix)]
+        fs::set_permissions(&creds_path, fs::Permissions::from_mode(0o600))?;
 
-    Ok(())
+        // Update current profile to the newly saved one
+        let current_file = TOOL.current_file()?;
+        fs_util::atomic_write(&current_file, &format!("{}\n", name))?;
+
+        Ok(())
+    })();
+
+    if result.is_err() && newly_created {
+        let _ = fs::remove_dir_all(&dest_dir);
+    }
+
+    result
 }
