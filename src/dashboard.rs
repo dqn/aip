@@ -137,11 +137,11 @@ async fn prefetch_claude_usage() -> UsageCache {
         .collect()
 }
 
-/// Merge new Claude usage cache with old cache.
+/// Merge new usage cache with old cache.
 ///
 /// When a new entry is stale and old entry has valid (non-stale) data,
 /// keep the old data but mark it as stale so the UI can show "(stale)".
-fn merge_claude_cache(new_cache: UsageCache, old_cache: Option<&UsageCache>) -> UsageCache {
+fn merge_usage_cache(new_cache: UsageCache, old_cache: Option<&UsageCache>) -> UsageCache {
     let old = match old_cache {
         Some(c) => c,
         None => return new_cache,
@@ -166,7 +166,7 @@ fn merge_claude_cache(new_cache: UsageCache, old_cache: Option<&UsageCache>) -> 
         .collect()
 }
 
-fn codex_usage_lines(result: Result<Option<RateLimits>>) -> Vec<String> {
+fn codex_usage_result(result: Result<Option<RateLimits>>) -> (Vec<String>, bool) {
     match result {
         Ok(Some(limits)) => {
             let mut lines = Vec::new();
@@ -187,13 +187,13 @@ fn codex_usage_lines(result: Result<Option<RateLimits>>) -> Vec<String> {
                 ));
             }
             if lines.is_empty() {
-                vec!["No usage data available".to_string()]
+                (vec!["No usage data available".to_string()], false)
             } else {
-                lines
+                (lines, false)
             }
         }
-        Ok(None) => vec!["No usage data available".to_string()],
-        Err(e) => vec![format!("Error: {}", e)],
+        Ok(None) => (vec!["No usage data available".to_string()], false),
+        Err(e) => (vec![format!("Error: {}", e)], true),
     }
 }
 
@@ -219,12 +219,13 @@ async fn prefetch_codex_usage(profiles: &[String]) -> UsageCache {
                 }
                 .await
             };
+            let (lines, is_stale) = codex_usage_result(result);
             (
                 p,
                 ProfileUsageCache {
-                    lines: codex_usage_lines(result),
+                    lines,
                     plan_type: None,
-                    is_stale: false,
+                    is_stale,
                 },
             )
         }));
@@ -609,13 +610,14 @@ pub async fn cmd_dashboard() -> Result<()> {
 
             tokio::select! {
                 cache = &mut claude_future, if pending_tools.contains(&Tool::Claude) => {
-                    let merged = merge_claude_cache(cache, usage_caches.get(&Tool::Claude));
+                    let merged = merge_usage_cache(cache, usage_caches.get(&Tool::Claude));
                     usage_caches.insert(Tool::Claude, merged);
                     pending_tools.remove(&Tool::Claude);
                     should_render = true;
                 }
                 cache = &mut codex_future, if pending_tools.contains(&Tool::Codex) => {
-                    usage_caches.insert(Tool::Codex, cache);
+                    let merged = merge_usage_cache(cache, usage_caches.get(&Tool::Codex));
+                    usage_caches.insert(Tool::Codex, merged);
                     pending_tools.remove(&Tool::Codex);
                     should_render = true;
                 }
@@ -1494,7 +1496,7 @@ mod tests {
     }
 
     #[test]
-    fn merge_claude_cache_keeps_old_data_when_new_is_stale() {
+    fn merge_usage_cache_keeps_old_data_when_new_is_stale() {
         let old: UsageCache = HashMap::from([(
             "main".to_string(),
             ProfileUsageCache {
@@ -1512,7 +1514,7 @@ mod tests {
             },
         )]);
 
-        let merged = merge_claude_cache(new, Some(&old));
+        let merged = merge_usage_cache(new, Some(&old));
         let entry = &merged["main"];
         assert!(entry.is_stale);
         assert_eq!(entry.lines, vec!["5-hour  40.0% used"]);
@@ -1520,7 +1522,7 @@ mod tests {
     }
 
     #[test]
-    fn merge_claude_cache_uses_new_data_when_not_stale() {
+    fn merge_usage_cache_uses_new_data_when_not_stale() {
         let old: UsageCache = HashMap::from([(
             "main".to_string(),
             ProfileUsageCache {
@@ -1538,14 +1540,14 @@ mod tests {
             },
         )]);
 
-        let merged = merge_claude_cache(new, Some(&old));
+        let merged = merge_usage_cache(new, Some(&old));
         let entry = &merged["main"];
         assert!(!entry.is_stale);
         assert_eq!(entry.lines, vec!["5-hour  50.0% used"]);
     }
 
     #[test]
-    fn merge_claude_cache_uses_fallback_when_no_old_data() {
+    fn merge_usage_cache_uses_fallback_when_no_old_data() {
         let new: UsageCache = HashMap::from([(
             "main".to_string(),
             ProfileUsageCache {
@@ -1555,14 +1557,14 @@ mod tests {
             },
         )]);
 
-        let merged = merge_claude_cache(new, None);
+        let merged = merge_usage_cache(new, None);
         let entry = &merged["main"];
         assert!(entry.is_stale);
         assert_eq!(entry.lines, vec!["Rate limited"]);
     }
 
     #[test]
-    fn merge_claude_cache_keeps_stale_fallback_when_old_also_stale() {
+    fn merge_usage_cache_keeps_stale_fallback_when_old_also_stale() {
         let old: UsageCache = HashMap::from([(
             "main".to_string(),
             ProfileUsageCache {
@@ -1580,11 +1582,43 @@ mod tests {
             },
         )]);
 
-        let merged = merge_claude_cache(new, Some(&old));
+        let merged = merge_usage_cache(new, Some(&old));
         let entry = &merged["main"];
         assert!(entry.is_stale);
         // Old was also stale, so keep old cached data
         assert_eq!(entry.lines, vec!["Rate limited"]);
+    }
+
+    #[test]
+    fn merge_usage_cache_preserves_codex_data_on_error() {
+        let old: UsageCache = HashMap::from([(
+            "default".to_string(),
+            ProfileUsageCache {
+                lines: vec![
+                    "5-hour  50.0% left".to_string(),
+                    "Weekly  70.0% left".to_string(),
+                ],
+                plan_type: None,
+                is_stale: false,
+            },
+        )]);
+        let new: UsageCache = HashMap::from([(
+            "default".to_string(),
+            ProfileUsageCache {
+                lines: vec!["Error: connection refused".to_string()],
+                plan_type: None,
+                is_stale: true,
+            },
+        )]);
+
+        let merged = merge_usage_cache(new, Some(&old));
+        let entry = &merged["default"];
+        assert!(entry.is_stale);
+        // Old valid data is preserved instead of being replaced with error
+        assert_eq!(
+            entry.lines,
+            vec!["5-hour  50.0% left", "Weekly  70.0% left"]
+        );
     }
 
     #[test]
@@ -1680,10 +1714,10 @@ mod tests {
         assert_eq!(result, "Rate limited (resets in 1m 0s)");
     }
 
-    // --- codex_usage_lines tests ---
+    // --- codex_usage_result tests ---
 
     #[test]
-    fn codex_usage_lines_with_both_windows() {
+    fn codex_usage_result_with_both_windows() {
         let limits = RateLimits {
             primary: Some(RateWindow {
                 used_percent: 50.0,
@@ -1694,24 +1728,27 @@ mod tests {
                 resets_at: 1700100000,
             }),
         };
-        let lines = codex_usage_lines(Ok(Some(limits)));
+        let (lines, is_stale) = codex_usage_result(Ok(Some(limits)));
         assert_eq!(lines.len(), 2);
         assert!(lines[0].contains("5-hour"));
         assert!(lines[1].contains("Weekly"));
+        assert!(!is_stale);
     }
 
     #[test]
-    fn codex_usage_lines_none_returns_no_data() {
-        let lines = codex_usage_lines(Ok(None));
+    fn codex_usage_result_none_returns_no_data() {
+        let (lines, is_stale) = codex_usage_result(Ok(None));
         assert_eq!(lines, vec!["No usage data available"]);
+        assert!(!is_stale);
     }
 
     #[test]
-    fn codex_usage_lines_error_starts_with_error() {
-        let lines = codex_usage_lines(Err(anyhow::anyhow!("connection failed")));
+    fn codex_usage_result_error_is_stale() {
+        let (lines, is_stale) = codex_usage_result(Err(anyhow::anyhow!("connection failed")));
         assert_eq!(lines.len(), 1);
         assert!(lines[0].starts_with("Error: "));
         assert!(lines[0].contains("connection failed"));
+        assert!(is_stale);
     }
 
     // --- status_message rendering test ---
