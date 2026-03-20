@@ -1,6 +1,7 @@
 mod claude;
 mod cli;
 mod codex;
+mod config;
 mod dashboard;
 mod display;
 mod fs_util;

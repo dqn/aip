@@ -9,6 +9,7 @@ use crate::claude;
 use crate::claude::usage::RateLimitError;
 use crate::codex;
 use crate::codex::usage::RateLimits;
+use crate::config::Config;
 use crate::display::{DisplayMode, DisplayPreference, format_usage_line};
 use crate::tool::Tool;
 
@@ -252,8 +253,13 @@ async fn prefetch_codex_usage(profiles: &[String]) -> UsageCache {
 
     let mut results = HashMap::new();
     for handle in handles {
-        if let Ok((p, entry)) = handle.await {
-            results.insert(p, entry);
+        match handle.await {
+            Ok((p, entry)) => {
+                results.insert(p, entry);
+            }
+            Err(join_err) => {
+                eprintln!("prefetch_codex_usage task panicked: {}", join_err);
+            }
         }
     }
     results
@@ -612,7 +618,7 @@ pub async fn cmd_dashboard() -> Result<()> {
     let mut key_rx = spawn_key_reader();
     let mut selected: usize = 0;
     let mut mode = DashboardMode::Normal;
-    let mut display_preference = DisplayPreference::Default;
+    let mut display_preference = Config::load().display_mode;
     let mut spinner_frame: usize = 0;
     let mut spinner_interval = tokio::time::interval(Duration::from_millis(80));
     let mut status_message: Option<String>;
@@ -676,6 +682,7 @@ pub async fn cmd_dashboard() -> Result<()> {
                         Err(_) => continue,
                     };
                     status_message = None;
+                    let prev_display_preference = display_preference;
                     match handle_dashboard_key(
                         key,
                         &mut selected,
@@ -711,13 +718,20 @@ pub async fn cmd_dashboard() -> Result<()> {
                             match tokio::task::spawn_blocking(move || {
                                 switch_profile(tool, &profile)
                             })
-                            .await?
+                            .await
                             {
-                                Ok(()) => break,
-                                Err(e) => {
+                                Ok(Ok(())) => break,
+                                Ok(Err(e)) => {
                                     status_message = Some(format!(
                                         "Failed to switch profile: {}",
                                         e,
+                                    ));
+                                    should_render = true;
+                                }
+                                Err(join_err) => {
+                                    status_message = Some(format!(
+                                        "Failed to switch profile: {}",
+                                        join_err,
                                     ));
                                     should_render = true;
                                 }
@@ -725,6 +739,9 @@ pub async fn cmd_dashboard() -> Result<()> {
                         }
                         DashboardAction::Render => should_render = true,
                         DashboardAction::None => {}
+                    }
+                    if display_preference != prev_display_preference {
+                        let _ = Config { display_mode: display_preference }.save();
                     }
                 }
             }

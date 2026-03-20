@@ -1,4 +1,5 @@
 use chrono::{DateTime, Local, Utc};
+use serde::{Deserialize, Serialize};
 
 const BAR_WIDTH: usize = 20;
 const RESET: &str = "\x1b[0m";
@@ -19,8 +20,10 @@ pub enum DisplayMode {
     Left,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum DisplayPreference {
+    #[default]
     Default,
     Used,
     Left,
