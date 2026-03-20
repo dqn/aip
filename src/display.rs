@@ -213,4 +213,18 @@ mod tests {
             DisplayMode::Left
         ));
     }
+
+    #[test]
+    fn format_usage_line_left_mode_clamps_over_100_to_zero() {
+        // percent 120.0 means 120% used; in Left mode, 100 - 120 = -20 -> clamped to 0.0
+        let line = format_usage_line("5-hour", 120.0, None, &DisplayMode::Left);
+        assert!(line.contains("0.0%"));
+    }
+
+    #[test]
+    fn format_usage_line_used_mode_clamps_negative_to_zero() {
+        // percent -10.0 in Used mode -> clamped to 0.0
+        let line = format_usage_line("5-hour", -10.0, None, &DisplayMode::Used);
+        assert!(line.contains("0.0%"));
+    }
 }

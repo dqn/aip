@@ -271,7 +271,194 @@ pub async fn fetch_all_profiles_usage() -> HashMap<String, Result<(UsageResponse
 
 #[cfg(test)]
 mod tests {
-    use super::UsageResponse;
+    use super::*;
+
+    // --- apply_token_response tests ---
+
+    #[test]
+    fn apply_token_response_normal_case_with_all_fields() {
+        let mut raw: Value = serde_json::json!({
+            "claudeAiOauth": {
+                "accessToken": "old_access",
+                "refreshToken": "old_refresh",
+                "expiresAt": 0
+            }
+        });
+        let token_resp = TokenResponse {
+            access_token: "new_access".to_string(),
+            refresh_token: Some("new_refresh".to_string()),
+            expires_in: Some(7200),
+        };
+        apply_token_response(&mut raw, &token_resp).unwrap();
+
+        let oauth = raw.get("claudeAiOauth").unwrap();
+        assert_eq!(oauth["accessToken"], "new_access");
+        assert_eq!(oauth["refreshToken"], "new_refresh");
+        assert!(oauth["expiresAt"].as_u64().unwrap() > 0);
+    }
+
+    #[test]
+    fn apply_token_response_expires_in_none_defaults_to_3600() {
+        let mut raw: Value = serde_json::json!({
+            "claudeAiOauth": {
+                "accessToken": "old",
+                "expiresAt": 0
+            }
+        });
+        let token_resp = TokenResponse {
+            access_token: "new".to_string(),
+            refresh_token: None,
+            expires_in: None,
+        };
+        let before_ms = Utc::now().timestamp_millis().max(0) as u64;
+        apply_token_response(&mut raw, &token_resp).unwrap();
+        let after_ms = Utc::now().timestamp_millis().max(0) as u64;
+
+        let expires_at = raw["claudeAiOauth"]["expiresAt"].as_u64().unwrap();
+        // Default 3600s = 3_600_000ms
+        assert!(expires_at >= before_ms + 3_600_000);
+        assert!(expires_at <= after_ms + 3_600_000);
+    }
+
+    #[test]
+    fn apply_token_response_expires_in_zero_clamps_to_60() {
+        let mut raw: Value = serde_json::json!({
+            "claudeAiOauth": {
+                "accessToken": "old",
+                "expiresAt": 0
+            }
+        });
+        let token_resp = TokenResponse {
+            access_token: "new".to_string(),
+            refresh_token: None,
+            expires_in: Some(0),
+        };
+        let before_ms = Utc::now().timestamp_millis().max(0) as u64;
+        apply_token_response(&mut raw, &token_resp).unwrap();
+        let after_ms = Utc::now().timestamp_millis().max(0) as u64;
+
+        let expires_at = raw["claudeAiOauth"]["expiresAt"].as_u64().unwrap();
+        // Clamped to 60s = 60_000ms
+        assert!(expires_at >= before_ms + 60_000);
+        assert!(expires_at <= after_ms + 60_000);
+    }
+
+    #[test]
+    fn apply_token_response_expires_in_large_clamps_to_86400() {
+        let mut raw: Value = serde_json::json!({
+            "claudeAiOauth": {
+                "accessToken": "old",
+                "expiresAt": 0
+            }
+        });
+        let token_resp = TokenResponse {
+            access_token: "new".to_string(),
+            refresh_token: None,
+            expires_in: Some(999999),
+        };
+        let before_ms = Utc::now().timestamp_millis().max(0) as u64;
+        apply_token_response(&mut raw, &token_resp).unwrap();
+        let after_ms = Utc::now().timestamp_millis().max(0) as u64;
+
+        let expires_at = raw["claudeAiOauth"]["expiresAt"].as_u64().unwrap();
+        // Clamped to 86400s = 86_400_000ms
+        assert!(expires_at >= before_ms + 86_400_000);
+        assert!(expires_at <= after_ms + 86_400_000);
+    }
+
+    #[test]
+    fn apply_token_response_refresh_token_none_does_not_overwrite() {
+        let mut raw: Value = serde_json::json!({
+            "claudeAiOauth": {
+                "accessToken": "old_access",
+                "refreshToken": "existing_refresh",
+                "expiresAt": 0
+            }
+        });
+        let token_resp = TokenResponse {
+            access_token: "new_access".to_string(),
+            refresh_token: None,
+            expires_in: Some(3600),
+        };
+        apply_token_response(&mut raw, &token_resp).unwrap();
+
+        assert_eq!(raw["claudeAiOauth"]["refreshToken"], "existing_refresh");
+    }
+
+    // --- is_token_expired tests ---
+
+    #[test]
+    fn is_token_expired_none_returns_false() {
+        let oauth = OAuthData {
+            access_token: "tok".to_string(),
+            refresh_token: None,
+            expires_at: None,
+            plan_type: None,
+        };
+        assert!(!is_token_expired(&oauth));
+    }
+
+    #[test]
+    fn is_token_expired_far_past_returns_true() {
+        let oauth = OAuthData {
+            access_token: "tok".to_string(),
+            refresh_token: None,
+            expires_at: Some(0),
+            plan_type: None,
+        };
+        assert!(is_token_expired(&oauth));
+    }
+
+    #[test]
+    fn is_token_expired_far_future_returns_false() {
+        let oauth = OAuthData {
+            access_token: "tok".to_string(),
+            refresh_token: None,
+            expires_at: Some(u64::MAX),
+            plan_type: None,
+        };
+        assert!(!is_token_expired(&oauth));
+    }
+
+    // --- read_oauth tests ---
+
+    #[test]
+    fn read_oauth_full_payload() {
+        let raw: Value = serde_json::json!({
+            "claudeAiOauth": {
+                "accessToken": "acc",
+                "refreshToken": "ref",
+                "expiresAt": 1234567890,
+                "planType": "pro"
+            }
+        });
+        let oauth = read_oauth(&raw).unwrap();
+        assert_eq!(oauth.access_token, "acc");
+        assert_eq!(oauth.refresh_token.as_deref(), Some("ref"));
+        assert_eq!(oauth.expires_at, Some(1234567890));
+        assert_eq!(oauth.plan_type.as_deref(), Some("pro"));
+    }
+
+    #[test]
+    fn read_oauth_missing_key_returns_error() {
+        let raw: Value = serde_json::json!({});
+        let err = read_oauth(&raw).unwrap_err();
+        assert!(err.to_string().contains("no OAuth data"));
+    }
+
+    #[test]
+    fn read_oauth_optional_fields_none_when_omitted() {
+        let raw: Value = serde_json::json!({
+            "claudeAiOauth": {
+                "accessToken": "acc"
+            }
+        });
+        let oauth = read_oauth(&raw).unwrap();
+        assert_eq!(oauth.access_token, "acc");
+        assert!(oauth.refresh_token.is_none());
+        assert!(oauth.expires_at.is_none());
+        assert!(oauth.plan_type.is_none());
+    }
 
     #[test]
     fn usage_response_accepts_null_resets_at() {

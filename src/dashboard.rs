@@ -1300,6 +1300,25 @@ mod tests {
     }
 
     #[test]
+    fn handle_dashboard_key_enter_on_non_current_profile_switches() {
+        let tool_profiles = sample_tool_profiles();
+        let selectable_items = build_selectable_items(&tool_profiles);
+        let mut selected = 1; // "work" is NOT current for Claude
+        let mut mode = DashboardMode::Normal;
+
+        let action = handle_dashboard_key(
+            Key::Enter,
+            &mut selected,
+            &mut mode,
+            &selectable_items,
+            &tool_profiles,
+            &mut None,
+            &mut DisplayPreference::Default,
+        );
+        assert!(matches!(action, DashboardAction::Switch(Tool::Claude, ref p) if p == "work"));
+    }
+
+    #[test]
     fn handle_dashboard_key_backspace_on_current_profile_does_nothing() {
         let tool_profiles = sample_tool_profiles();
         let selectable_items = build_selectable_items(&tool_profiles);
@@ -1778,7 +1797,7 @@ mod tests {
     }
 
     #[test]
-    fn merge_usage_cache_keeps_stale_fallback_when_old_also_stale() {
+    fn merge_usage_cache_uses_new_data_when_old_also_stale() {
         let old: UsageCache = HashMap::from([(
             "main".to_string(),
             ProfileUsageCache {
@@ -1799,7 +1818,7 @@ mod tests {
         let merged = merge_usage_cache(new, Some(&old));
         let entry = &merged["main"];
         assert!(entry.is_stale);
-        // Old was also stale, so keep old cached data
+        // Both old and new are stale, so new data is used (no fallback to stale old)
         assert_eq!(
             entry.usage_lines,
             vec![UsageLine::Text("Rate limited".to_string())]
@@ -1941,17 +1960,31 @@ mod tests {
         let limits = RateLimits {
             primary: Some(RateWindow {
                 used_percent: 50.0,
-                resets_at: 1700000000,
+                resets_at: Some(1700000000),
             }),
             secondary: Some(RateWindow {
                 used_percent: 30.0,
-                resets_at: 1700100000,
+                resets_at: Some(1700100000),
             }),
         };
         let (lines, is_stale) = codex_usage_result(Ok(Some(limits)));
         assert_eq!(lines.len(), 2);
         assert!(matches!(&lines[0], UsageLine::Data { label, .. } if label == "5-hour"));
         assert!(matches!(&lines[1], UsageLine::Data { label, .. } if label == "Weekly"));
+        assert!(!is_stale);
+    }
+
+    #[test]
+    fn codex_usage_result_empty_windows_returns_no_data() {
+        let limits = RateLimits {
+            primary: None,
+            secondary: None,
+        };
+        let (lines, is_stale) = codex_usage_result(Ok(Some(limits)));
+        assert_eq!(
+            lines,
+            vec![UsageLine::Text("No usage data available".to_string())]
+        );
         assert!(!is_stale);
     }
 
