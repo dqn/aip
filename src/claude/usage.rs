@@ -262,8 +262,13 @@ pub async fn fetch_all_profiles_usage() -> HashMap<String, Result<(UsageResponse
 
     let mut results = HashMap::new();
     for handle in handles {
-        if let Ok((profile, result)) = handle.await {
-            results.insert(profile, result);
+        match handle.await {
+            Ok((profile, result)) => {
+                results.insert(profile, result);
+            }
+            Err(e) => {
+                eprintln!("profile task failed: {e}");
+            }
         }
     }
     results

@@ -180,17 +180,27 @@ async fn fetch_from_auth_path(path: &Path) -> Result<Option<RateLimits>> {
 
 pub async fn fetch_usage() -> Result<Option<RateLimits>> {
     let path = Tool::Codex.home_dir()?.join("auth.json");
-    if !path.exists() {
-        return Ok(None);
+    match fetch_from_auth_path(&path).await {
+        Err(e)
+            if e.downcast_ref::<std::io::Error>()
+                .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound) =>
+        {
+            Ok(None)
+        }
+        other => other,
     }
-    fetch_from_auth_path(&path).await
 }
 
 pub async fn fetch_usage_from_auth(path: &Path) -> Result<Option<RateLimits>> {
-    if !path.exists() {
-        return Ok(None);
+    match fetch_from_auth_path(path).await {
+        Err(e)
+            if e.downcast_ref::<std::io::Error>()
+                .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound) =>
+        {
+            Ok(None)
+        }
+        other => other,
     }
-    fetch_from_auth_path(path).await
 }
 
 #[cfg(test)]
