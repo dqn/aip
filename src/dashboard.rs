@@ -9,16 +9,33 @@ use crate::claude;
 use crate::claude::usage::RateLimitError;
 use crate::codex;
 use crate::codex::usage::RateLimits;
-use crate::display::{DisplayMode, format_usage_line};
+use crate::display::{DisplayMode, DisplayPreference, format_usage_line};
 use crate::tool::Tool;
 
 const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 #[derive(Clone, Debug, PartialEq)]
+enum UsageLine {
+    Data {
+        label: String,
+        percent: f64,
+        resets_at: Option<chrono::DateTime<chrono::Utc>>,
+    },
+    Text(String),
+}
+
+#[derive(Clone, Debug, PartialEq)]
 struct ProfileUsageCache {
-    lines: Vec<String>,
+    usage_lines: Vec<UsageLine>,
     plan_type: Option<String>,
     is_stale: bool,
+}
+
+fn default_display_mode(tool: &Tool) -> DisplayMode {
+    match tool {
+        Tool::Claude => DisplayMode::Used,
+        Tool::Codex => DisplayMode::Left,
+    }
 }
 
 type UsageCache = HashMap<String, ProfileUsageCache>;
@@ -96,19 +113,17 @@ async fn prefetch_claude_usage() -> UsageCache {
         .map(|(profile, result)| {
             let entry = match result {
                 Ok((usage, info)) => ProfileUsageCache {
-                    lines: vec![
-                        format_usage_line(
-                            "5-hour",
-                            usage.five_hour.utilization,
-                            usage.five_hour.resets_at,
-                            &DisplayMode::Used,
-                        ),
-                        format_usage_line(
-                            "Weekly",
-                            usage.seven_day.utilization,
-                            usage.seven_day.resets_at,
-                            &DisplayMode::Used,
-                        ),
+                    usage_lines: vec![
+                        UsageLine::Data {
+                            label: "5-hour".to_string(),
+                            percent: usage.five_hour.utilization,
+                            resets_at: usage.five_hour.resets_at,
+                        },
+                        UsageLine::Data {
+                            label: "Weekly".to_string(),
+                            percent: usage.seven_day.utilization,
+                            resets_at: usage.seven_day.resets_at,
+                        },
                     ],
                     plan_type: info.plan_type,
                     is_stale: false,
@@ -117,7 +132,7 @@ async fn prefetch_claude_usage() -> UsageCache {
                     if let Some(rate_err) = e.downcast_ref::<RateLimitError>() {
                         let retry = rate_err.retry_after;
                         ProfileUsageCache {
-                            lines: vec![format_retry_after(retry)],
+                            usage_lines: vec![UsageLine::Text(format_retry_after(retry))],
                             plan_type: None,
                             // retry-after:0 may indicate unsupported plan;
                             // use stale cache to preserve previous usage data.
@@ -125,7 +140,7 @@ async fn prefetch_claude_usage() -> UsageCache {
                         }
                     } else {
                         ProfileUsageCache {
-                            lines: vec![format!("Error: {}", e)],
+                            usage_lines: vec![UsageLine::Text(format!("Error: {}", e))],
                             plan_type: None,
                             is_stale: true,
                         }
@@ -166,34 +181,38 @@ fn merge_usage_cache(new_cache: UsageCache, old_cache: Option<&UsageCache>) -> U
         .collect()
 }
 
-fn codex_usage_result(result: Result<Option<RateLimits>>) -> (Vec<String>, bool) {
+fn codex_usage_result(result: Result<Option<RateLimits>>) -> (Vec<UsageLine>, bool) {
     match result {
         Ok(Some(limits)) => {
             let mut lines = Vec::new();
             if let Some(primary) = &limits.primary {
-                lines.push(format_usage_line(
-                    "5-hour",
-                    primary.used_percent,
-                    primary.resets_at_utc(),
-                    &DisplayMode::Left,
-                ));
+                lines.push(UsageLine::Data {
+                    label: "5-hour".to_string(),
+                    percent: primary.used_percent,
+                    resets_at: primary.resets_at_utc(),
+                });
             }
             if let Some(secondary) = &limits.secondary {
-                lines.push(format_usage_line(
-                    "Weekly",
-                    secondary.used_percent,
-                    secondary.resets_at_utc(),
-                    &DisplayMode::Left,
-                ));
+                lines.push(UsageLine::Data {
+                    label: "Weekly".to_string(),
+                    percent: secondary.used_percent,
+                    resets_at: secondary.resets_at_utc(),
+                });
             }
             if lines.is_empty() {
-                (vec!["No usage data available".to_string()], false)
+                (
+                    vec![UsageLine::Text("No usage data available".to_string())],
+                    false,
+                )
             } else {
                 (lines, false)
             }
         }
-        Ok(None) => (vec!["No usage data available".to_string()], false),
-        Err(e) => (vec![format!("Error: {}", e)], true),
+        Ok(None) => (
+            vec![UsageLine::Text("No usage data available".to_string())],
+            false,
+        ),
+        Err(e) => (vec![UsageLine::Text(format!("Error: {}", e))], true),
     }
 }
 
@@ -219,11 +238,11 @@ async fn prefetch_codex_usage(profiles: &[String]) -> UsageCache {
                 }
                 .await
             };
-            let (lines, is_stale) = codex_usage_result(result);
+            let (usage_lines, is_stale) = codex_usage_result(result);
             (
                 p,
                 ProfileUsageCache {
-                    lines,
+                    usage_lines,
                     plan_type: None,
                     is_stale,
                 },
@@ -291,6 +310,7 @@ struct DashboardView<'a> {
     mode: &'a DashboardMode,
     spinner_frame: usize,
     status_message: Option<&'a str>,
+    display_preference: DisplayPreference,
 }
 
 impl DashboardView<'_> {
@@ -351,8 +371,17 @@ impl DashboardView<'_> {
                     }
 
                     if let Some(entry) = entry {
-                        for line in &entry.lines {
-                            lines.push(format!("    {}", line));
+                        let mode = self.display_preference.resolve(default_display_mode(tool));
+                        for usage_line in &entry.usage_lines {
+                            let formatted = match usage_line {
+                                UsageLine::Data {
+                                    label,
+                                    percent,
+                                    resets_at,
+                                } => format_usage_line(label, *percent, *resets_at, &mode),
+                                UsageLine::Text(text) => text.clone(),
+                            };
+                            lines.push(format!("    {}", formatted));
                         }
                     } else if !self.pending_tools.contains(tool) {
                         lines.push("    (no data)".to_string());
@@ -373,7 +402,7 @@ impl DashboardView<'_> {
         match self.mode {
             DashboardMode::Normal => {
                 lines.push(
-                    "[R] Refresh  [↑↓] Navigate  [Enter/Space] Switch  [BS/Del] Delete  [Shift+J/K] Reorder  [ESC/q] Quit"
+                    "[R] Refresh  [D] Display  [↑↓] Navigate  [Enter/Space] Switch  [BS/Del] Delete  [Shift+J/K] Reorder  [ESC/q] Quit"
                         .to_string(),
                 );
             }
@@ -469,10 +498,15 @@ fn handle_dashboard_key(
     selectable_items: &[(Tool, String)],
     tool_profiles: &[(Tool, Vec<String>, Option<String>)],
     status_message: &mut Option<String>,
+    display_preference: &mut DisplayPreference,
 ) -> DashboardAction {
     if selectable_items.is_empty() {
         return match key {
             Key::Char('r') => DashboardAction::Refresh,
+            Key::Char('d') => {
+                *display_preference = display_preference.next();
+                DashboardAction::Render
+            }
             Key::Escape | Key::Char('q') => DashboardAction::Quit,
             _ => DashboardAction::None,
         };
@@ -506,6 +540,10 @@ fn handle_dashboard_key(
                 DashboardAction::Render
             }
             Key::Char('r') => DashboardAction::Refresh,
+            Key::Char('d') => {
+                *display_preference = display_preference.next();
+                DashboardAction::Render
+            }
             Key::Char('K') => handle_move(selected, selectable_items, tool_profiles, -1),
             Key::Char('J') => handle_move(selected, selectable_items, tool_profiles, 1),
             Key::Escape | Key::Char('q') => DashboardAction::Quit,
@@ -548,6 +586,7 @@ fn render_dashboard(
     mode: &DashboardMode,
     spinner_frame: usize,
     status_message: Option<&str>,
+    display_preference: DisplayPreference,
 ) -> Result<()> {
     DashboardView {
         tool_profiles,
@@ -558,6 +597,7 @@ fn render_dashboard(
         mode,
         spinner_frame,
         status_message,
+        display_preference,
     }
     .render(term)
 }
@@ -572,6 +612,7 @@ pub async fn cmd_dashboard() -> Result<()> {
     let mut key_rx = spawn_key_reader();
     let mut selected: usize = 0;
     let mut mode = DashboardMode::Normal;
+    let mut display_preference = DisplayPreference::Default;
     let mut spinner_frame: usize = 0;
     let mut spinner_interval = tokio::time::interval(Duration::from_millis(80));
     let mut status_message: Option<String>;
@@ -603,6 +644,7 @@ pub async fn cmd_dashboard() -> Result<()> {
             &mode,
             spinner_frame,
             status_message.as_deref(),
+            display_preference,
         )?;
 
         loop {
@@ -641,6 +683,7 @@ pub async fn cmd_dashboard() -> Result<()> {
                         &selectable_items,
                         &tool_profiles,
                         &mut status_message,
+                        &mut display_preference,
                     ) {
                         DashboardAction::Quit => return Ok(()),
                         DashboardAction::Refresh => break,
@@ -692,6 +735,7 @@ pub async fn cmd_dashboard() -> Result<()> {
                     &mode,
                     spinner_frame,
                     status_message.as_deref(),
+                    display_preference,
                 )?;
             }
         }
@@ -721,13 +765,14 @@ mod tests {
             mode,
             spinner_frame,
             status_message: None,
+            display_preference: DisplayPreference::Default,
         }
         .build_lines()
     }
 
-    fn make_entry(lines: Vec<String>, plan_type: Option<&str>) -> ProfileUsageCache {
+    fn make_entry(usage_lines: Vec<UsageLine>, plan_type: Option<&str>) -> ProfileUsageCache {
         ProfileUsageCache {
-            lines,
+            usage_lines,
             plan_type: plan_type.map(String::from),
             is_stale: false,
         }
@@ -883,7 +928,10 @@ mod tests {
         let mut claude_cache: UsageCache = HashMap::new();
         claude_cache.insert(
             "personal".to_string(),
-            make_entry(vec!["5-hour  60.0% used".to_string()], None),
+            make_entry(
+                vec![UsageLine::Text("5-hour  60.0% used".to_string())],
+                None,
+            ),
         );
         let mut usage_caches = HashMap::new();
         usage_caches.insert(Tool::Claude, claude_cache);
@@ -913,7 +961,10 @@ mod tests {
         let mut claude_cache: UsageCache = HashMap::new();
         claude_cache.insert(
             "personal".to_string(),
-            make_entry(vec!["5-hour  60.0% used".to_string()], None),
+            make_entry(
+                vec![UsageLine::Text("5-hour  60.0% used".to_string())],
+                None,
+            ),
         );
         let mut usage_caches = HashMap::new();
         usage_caches.insert(Tool::Claude, claude_cache);
@@ -1045,7 +1096,10 @@ mod tests {
         let mut claude_cache: UsageCache = HashMap::new();
         claude_cache.insert(
             "personal".to_string(),
-            make_entry(vec!["5-hour  60.0% used".to_string()], Some("pro")),
+            make_entry(
+                vec![UsageLine::Text("5-hour  60.0% used".to_string())],
+                Some("pro"),
+            ),
         );
         let mut usage_caches = HashMap::new();
         usage_caches.insert(Tool::Claude, claude_cache);
@@ -1078,7 +1132,10 @@ mod tests {
         let mut claude_cache: UsageCache = HashMap::new();
         claude_cache.insert(
             "personal".to_string(),
-            make_entry(vec!["5-hour  60.0% used".to_string()], None),
+            make_entry(
+                vec![UsageLine::Text("5-hour  60.0% used".to_string())],
+                None,
+            ),
         );
         let mut usage_caches = HashMap::new();
         usage_caches.insert(Tool::Claude, claude_cache);
@@ -1169,6 +1226,7 @@ mod tests {
             &selectable_items,
             &tool_profiles,
             &mut None,
+            &mut DisplayPreference::Default,
         );
         assert!(matches!(action, DashboardAction::Render));
         assert_eq!(selected, 1);
@@ -1180,6 +1238,7 @@ mod tests {
             &selectable_items,
             &tool_profiles,
             &mut None,
+            &mut DisplayPreference::Default,
         );
         assert!(matches!(action, DashboardAction::Render));
         assert_eq!(selected, 0);
@@ -1199,6 +1258,7 @@ mod tests {
             &selectable_items,
             &tool_profiles,
             &mut None,
+            &mut DisplayPreference::Default,
         );
         assert_eq!(selected, 0);
 
@@ -1210,6 +1270,7 @@ mod tests {
             &selectable_items,
             &tool_profiles,
             &mut None,
+            &mut DisplayPreference::Default,
         );
         assert_eq!(selected, selectable_items.len() - 1);
     }
@@ -1228,6 +1289,7 @@ mod tests {
             &selectable_items,
             &tool_profiles,
             &mut None,
+            &mut DisplayPreference::Default,
         );
         assert!(matches!(action, DashboardAction::None));
     }
@@ -1246,6 +1308,7 @@ mod tests {
             &selectable_items,
             &tool_profiles,
             &mut None,
+            &mut DisplayPreference::Default,
         );
         assert!(matches!(action, DashboardAction::None));
     }
@@ -1264,6 +1327,7 @@ mod tests {
             &selectable_items,
             &tool_profiles,
             &mut None,
+            &mut DisplayPreference::Default,
         );
         assert!(matches!(action, DashboardAction::Render));
         assert!(matches!(mode, DashboardMode::DeleteConfirm(1)));
@@ -1283,6 +1347,7 @@ mod tests {
             &selectable_items,
             &tool_profiles,
             &mut None,
+            &mut DisplayPreference::Default,
         );
         assert!(matches!(action, DashboardAction::Quit));
     }
@@ -1301,6 +1366,7 @@ mod tests {
             &selectable_items,
             &tool_profiles,
             &mut None,
+            &mut DisplayPreference::Default,
         );
         assert!(matches!(action, DashboardAction::Quit));
     }
@@ -1319,6 +1385,7 @@ mod tests {
             &selectable_items,
             &tool_profiles,
             &mut None,
+            &mut DisplayPreference::Default,
         );
         assert!(matches!(action, DashboardAction::Render));
         assert!(matches!(mode, DashboardMode::Normal));
@@ -1338,6 +1405,7 @@ mod tests {
             &selectable_items,
             &tool_profiles,
             &mut None,
+            &mut DisplayPreference::Default,
         );
         assert!(matches!(action, DashboardAction::Render));
         assert!(matches!(mode, DashboardMode::Normal));
@@ -1401,6 +1469,7 @@ mod tests {
             &selectable_items,
             &tool_profiles,
             &mut None,
+            &mut DisplayPreference::Default,
         );
         // handle_move calls save_profile_order which may fail in test env,
         // but selected should still be updated on success (Reload) or unchanged (None).
@@ -1424,6 +1493,7 @@ mod tests {
             &selectable_items,
             &tool_profiles,
             &mut None,
+            &mut DisplayPreference::Default,
         );
         match action {
             DashboardAction::Refresh => assert_eq!(selected, 0),
@@ -1445,6 +1515,7 @@ mod tests {
             &selectable_items,
             &tool_profiles,
             &mut None,
+            &mut DisplayPreference::Default,
         );
         assert!(matches!(action, DashboardAction::Refresh));
     }
@@ -1463,6 +1534,7 @@ mod tests {
             &selectable_items,
             &tool_profiles,
             &mut None,
+            &mut DisplayPreference::Default,
         );
         assert!(matches!(action, DashboardAction::Quit));
 
@@ -1473,6 +1545,7 @@ mod tests {
             &selectable_items,
             &tool_profiles,
             &mut None,
+            &mut DisplayPreference::Default,
         );
         assert!(matches!(action, DashboardAction::None));
     }
@@ -1491,8 +1564,135 @@ mod tests {
             &selectable_items,
             &tool_profiles,
             &mut None,
+            &mut DisplayPreference::Default,
         );
         assert!(matches!(action, DashboardAction::Refresh));
+    }
+
+    #[test]
+    fn handle_dashboard_key_d_cycles_display_preference() {
+        let tool_profiles = sample_tool_profiles();
+        let selectable_items = build_selectable_items(&tool_profiles);
+        let mut selected = 0;
+        let mut mode = DashboardMode::Normal;
+        let mut display_pref = DisplayPreference::Default;
+
+        let action = handle_dashboard_key(
+            Key::Char('d'),
+            &mut selected,
+            &mut mode,
+            &selectable_items,
+            &tool_profiles,
+            &mut None,
+            &mut display_pref,
+        );
+        assert!(matches!(action, DashboardAction::Render));
+        assert_eq!(display_pref, DisplayPreference::Used);
+
+        handle_dashboard_key(
+            Key::Char('d'),
+            &mut selected,
+            &mut mode,
+            &selectable_items,
+            &tool_profiles,
+            &mut None,
+            &mut display_pref,
+        );
+        assert_eq!(display_pref, DisplayPreference::Left);
+
+        handle_dashboard_key(
+            Key::Char('d'),
+            &mut selected,
+            &mut mode,
+            &selectable_items,
+            &tool_profiles,
+            &mut None,
+            &mut display_pref,
+        );
+        assert_eq!(display_pref, DisplayPreference::Default);
+    }
+
+    #[test]
+    fn handle_dashboard_key_d_works_when_no_selectable_items() {
+        let tool_profiles = vec![(Tool::Claude, vec![], None)];
+        let selectable_items = build_selectable_items(&tool_profiles);
+        let mut selected = 0;
+        let mut mode = DashboardMode::Normal;
+        let mut display_pref = DisplayPreference::Default;
+
+        let action = handle_dashboard_key(
+            Key::Char('d'),
+            &mut selected,
+            &mut mode,
+            &selectable_items,
+            &tool_profiles,
+            &mut None,
+            &mut display_pref,
+        );
+        assert!(matches!(action, DashboardAction::Render));
+        assert_eq!(display_pref, DisplayPreference::Used);
+    }
+
+    #[test]
+    fn build_dashboard_lines_formats_data_with_display_preference() {
+        let tool_profiles = vec![(
+            Tool::Claude,
+            vec!["personal".to_string()],
+            Some("personal".to_string()),
+        )];
+        let mut claude_cache: UsageCache = HashMap::new();
+        claude_cache.insert(
+            "personal".to_string(),
+            make_entry(
+                vec![UsageLine::Data {
+                    label: "5-hour".to_string(),
+                    percent: 60.0,
+                    resets_at: None,
+                }],
+                None,
+            ),
+        );
+        let mut usage_caches = HashMap::new();
+        usage_caches.insert(Tool::Claude, claude_cache);
+        let selectable_items = build_selectable_items(&tool_profiles);
+
+        // Default for Claude is Used
+        let lines_used = DashboardView {
+            tool_profiles: &tool_profiles,
+            usage_caches: &usage_caches,
+            pending_tools: &HashSet::new(),
+            selectable_items: &selectable_items,
+            selected: 0,
+            mode: &DashboardMode::Normal,
+            spinner_frame: 0,
+            status_message: None,
+            display_preference: DisplayPreference::Default,
+        }
+        .build_lines();
+        assert!(
+            lines_used
+                .iter()
+                .any(|l| l.contains("60.0%") && l.contains("used"))
+        );
+
+        // Override to Left
+        let lines_left = DashboardView {
+            tool_profiles: &tool_profiles,
+            usage_caches: &usage_caches,
+            pending_tools: &HashSet::new(),
+            selectable_items: &selectable_items,
+            selected: 0,
+            mode: &DashboardMode::Normal,
+            spinner_frame: 0,
+            status_message: None,
+            display_preference: DisplayPreference::Left,
+        }
+        .build_lines();
+        assert!(
+            lines_left
+                .iter()
+                .any(|l| l.contains("40.0%") && l.contains("left"))
+        );
     }
 
     #[test]
@@ -1500,7 +1700,7 @@ mod tests {
         let old: UsageCache = HashMap::from([(
             "main".to_string(),
             ProfileUsageCache {
-                lines: vec!["5-hour  40.0% used".to_string()],
+                usage_lines: vec![UsageLine::Text("5-hour  40.0% used".to_string())],
                 plan_type: Some("pro".to_string()),
                 is_stale: false,
             },
@@ -1508,7 +1708,7 @@ mod tests {
         let new: UsageCache = HashMap::from([(
             "main".to_string(),
             ProfileUsageCache {
-                lines: vec!["Rate limited".to_string()],
+                usage_lines: vec![UsageLine::Text("Rate limited".to_string())],
                 plan_type: None,
                 is_stale: true,
             },
@@ -1517,7 +1717,10 @@ mod tests {
         let merged = merge_usage_cache(new, Some(&old));
         let entry = &merged["main"];
         assert!(entry.is_stale);
-        assert_eq!(entry.lines, vec!["5-hour  40.0% used"]);
+        assert_eq!(
+            entry.usage_lines,
+            vec![UsageLine::Text("5-hour  40.0% used".to_string())]
+        );
         assert_eq!(entry.plan_type, Some("pro".to_string()));
     }
 
@@ -1526,7 +1729,7 @@ mod tests {
         let old: UsageCache = HashMap::from([(
             "main".to_string(),
             ProfileUsageCache {
-                lines: vec!["5-hour  40.0% used".to_string()],
+                usage_lines: vec![UsageLine::Text("5-hour  40.0% used".to_string())],
                 plan_type: Some("pro".to_string()),
                 is_stale: false,
             },
@@ -1534,7 +1737,7 @@ mod tests {
         let new: UsageCache = HashMap::from([(
             "main".to_string(),
             ProfileUsageCache {
-                lines: vec!["5-hour  50.0% used".to_string()],
+                usage_lines: vec![UsageLine::Text("5-hour  50.0% used".to_string())],
                 plan_type: Some("pro".to_string()),
                 is_stale: false,
             },
@@ -1543,7 +1746,10 @@ mod tests {
         let merged = merge_usage_cache(new, Some(&old));
         let entry = &merged["main"];
         assert!(!entry.is_stale);
-        assert_eq!(entry.lines, vec!["5-hour  50.0% used"]);
+        assert_eq!(
+            entry.usage_lines,
+            vec![UsageLine::Text("5-hour  50.0% used".to_string())]
+        );
     }
 
     #[test]
@@ -1551,7 +1757,7 @@ mod tests {
         let new: UsageCache = HashMap::from([(
             "main".to_string(),
             ProfileUsageCache {
-                lines: vec!["Rate limited".to_string()],
+                usage_lines: vec![UsageLine::Text("Rate limited".to_string())],
                 plan_type: None,
                 is_stale: true,
             },
@@ -1560,7 +1766,10 @@ mod tests {
         let merged = merge_usage_cache(new, None);
         let entry = &merged["main"];
         assert!(entry.is_stale);
-        assert_eq!(entry.lines, vec!["Rate limited"]);
+        assert_eq!(
+            entry.usage_lines,
+            vec![UsageLine::Text("Rate limited".to_string())]
+        );
     }
 
     #[test]
@@ -1568,7 +1777,7 @@ mod tests {
         let old: UsageCache = HashMap::from([(
             "main".to_string(),
             ProfileUsageCache {
-                lines: vec!["5-hour  40.0% used".to_string()],
+                usage_lines: vec![UsageLine::Text("5-hour  40.0% used".to_string())],
                 plan_type: Some("pro".to_string()),
                 is_stale: true,
             },
@@ -1576,7 +1785,7 @@ mod tests {
         let new: UsageCache = HashMap::from([(
             "main".to_string(),
             ProfileUsageCache {
-                lines: vec!["Rate limited".to_string()],
+                usage_lines: vec![UsageLine::Text("Rate limited".to_string())],
                 plan_type: None,
                 is_stale: true,
             },
@@ -1586,7 +1795,10 @@ mod tests {
         let entry = &merged["main"];
         assert!(entry.is_stale);
         // Old was also stale, so keep old cached data
-        assert_eq!(entry.lines, vec!["Rate limited"]);
+        assert_eq!(
+            entry.usage_lines,
+            vec![UsageLine::Text("Rate limited".to_string())]
+        );
     }
 
     #[test]
@@ -1594,9 +1806,9 @@ mod tests {
         let old: UsageCache = HashMap::from([(
             "default".to_string(),
             ProfileUsageCache {
-                lines: vec![
-                    "5-hour  50.0% left".to_string(),
-                    "Weekly  70.0% left".to_string(),
+                usage_lines: vec![
+                    UsageLine::Text("5-hour  50.0% left".to_string()),
+                    UsageLine::Text("Weekly  70.0% left".to_string()),
                 ],
                 plan_type: None,
                 is_stale: false,
@@ -1605,7 +1817,7 @@ mod tests {
         let new: UsageCache = HashMap::from([(
             "default".to_string(),
             ProfileUsageCache {
-                lines: vec!["Error: connection refused".to_string()],
+                usage_lines: vec![UsageLine::Text("Error: connection refused".to_string())],
                 plan_type: None,
                 is_stale: true,
             },
@@ -1616,8 +1828,11 @@ mod tests {
         assert!(entry.is_stale);
         // Old valid data is preserved instead of being replaced with error
         assert_eq!(
-            entry.lines,
-            vec!["5-hour  50.0% left", "Weekly  70.0% left"]
+            entry.usage_lines,
+            vec![
+                UsageLine::Text("5-hour  50.0% left".to_string()),
+                UsageLine::Text("Weekly  70.0% left".to_string()),
+            ]
         );
     }
 
@@ -1632,7 +1847,7 @@ mod tests {
         claude_cache.insert(
             "main".to_string(),
             ProfileUsageCache {
-                lines: vec!["5-hour  40.0% used".to_string()],
+                usage_lines: vec![UsageLine::Text("5-hour  40.0% used".to_string())],
                 plan_type: Some("pro".to_string()),
                 is_stale: true,
             },
@@ -1666,7 +1881,7 @@ mod tests {
         claude_cache.insert(
             "main".to_string(),
             ProfileUsageCache {
-                lines: vec!["5-hour  40.0% used".to_string()],
+                usage_lines: vec![UsageLine::Text("5-hour  40.0% used".to_string())],
                 plan_type: Some("pro".to_string()),
                 is_stale: false,
             },
@@ -1730,15 +1945,18 @@ mod tests {
         };
         let (lines, is_stale) = codex_usage_result(Ok(Some(limits)));
         assert_eq!(lines.len(), 2);
-        assert!(lines[0].contains("5-hour"));
-        assert!(lines[1].contains("Weekly"));
+        assert!(matches!(&lines[0], UsageLine::Data { label, .. } if label == "5-hour"));
+        assert!(matches!(&lines[1], UsageLine::Data { label, .. } if label == "Weekly"));
         assert!(!is_stale);
     }
 
     #[test]
     fn codex_usage_result_none_returns_no_data() {
         let (lines, is_stale) = codex_usage_result(Ok(None));
-        assert_eq!(lines, vec!["No usage data available"]);
+        assert_eq!(
+            lines,
+            vec![UsageLine::Text("No usage data available".to_string())]
+        );
         assert!(!is_stale);
     }
 
@@ -1746,8 +1964,9 @@ mod tests {
     fn codex_usage_result_error_is_stale() {
         let (lines, is_stale) = codex_usage_result(Err(anyhow::anyhow!("connection failed")));
         assert_eq!(lines.len(), 1);
-        assert!(lines[0].starts_with("Error: "));
-        assert!(lines[0].contains("connection failed"));
+        assert!(
+            matches!(&lines[0], UsageLine::Text(t) if t.starts_with("Error: ") && t.contains("connection failed"))
+        );
         assert!(is_stale);
     }
 
@@ -1771,6 +1990,7 @@ mod tests {
             mode: &DashboardMode::Normal,
             spinner_frame: 0,
             status_message: Some("Failed to delete profile: not found"),
+            display_preference: DisplayPreference::Default,
         };
         let lines = view.build_lines();
 
@@ -1810,6 +2030,7 @@ mod tests {
             &selectable_items,
             &tool_profiles,
             &mut status_message,
+            &mut DisplayPreference::Default,
         );
 
         // delete_profile will fail in test environment (no real profile dirs),

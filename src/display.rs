@@ -13,9 +13,35 @@ fn danger_color(used_percent: f64) -> &'static str {
     }
 }
 
+#[derive(Clone, Copy)]
 pub enum DisplayMode {
     Used,
     Left,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum DisplayPreference {
+    Default,
+    Used,
+    Left,
+}
+
+impl DisplayPreference {
+    pub fn next(self) -> Self {
+        match self {
+            DisplayPreference::Default => DisplayPreference::Used,
+            DisplayPreference::Used => DisplayPreference::Left,
+            DisplayPreference::Left => DisplayPreference::Default,
+        }
+    }
+
+    pub fn resolve(self, tool_default: DisplayMode) -> DisplayMode {
+        match self {
+            DisplayPreference::Default => tool_default,
+            DisplayPreference::Used => DisplayMode::Used,
+            DisplayPreference::Left => DisplayMode::Left,
+        }
+    }
 }
 
 pub fn render_bar(percent: f64, color: &str) -> String {
@@ -151,5 +177,40 @@ mod tests {
 
         assert!(line.contains("60.0%"));
         assert!(line.contains("used"));
+    }
+
+    #[test]
+    fn display_preference_next_cycles_through_all_modes() {
+        let pref = DisplayPreference::Default;
+        let pref = pref.next();
+        assert_eq!(pref, DisplayPreference::Used);
+        let pref = pref.next();
+        assert_eq!(pref, DisplayPreference::Left);
+        let pref = pref.next();
+        assert_eq!(pref, DisplayPreference::Default);
+    }
+
+    #[test]
+    fn display_preference_resolve_default_returns_tool_default() {
+        assert!(matches!(
+            DisplayPreference::Default.resolve(DisplayMode::Used),
+            DisplayMode::Used
+        ));
+        assert!(matches!(
+            DisplayPreference::Default.resolve(DisplayMode::Left),
+            DisplayMode::Left
+        ));
+    }
+
+    #[test]
+    fn display_preference_resolve_overrides_tool_default() {
+        assert!(matches!(
+            DisplayPreference::Used.resolve(DisplayMode::Left),
+            DisplayMode::Used
+        ));
+        assert!(matches!(
+            DisplayPreference::Left.resolve(DisplayMode::Used),
+            DisplayMode::Left
+        ));
     }
 }
