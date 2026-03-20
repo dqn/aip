@@ -1,4 +1,7 @@
 use std::collections::HashMap;
+use std::fs;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::time::Duration;
 
@@ -189,7 +192,13 @@ async fn get_access_token_from_credentials(
     apply_token_response(&mut raw, &token_resp)?;
     let new_content = serde_json::to_string_pretty(&raw)?;
     let path = path.to_owned();
-    tokio::task::spawn_blocking(move || fs_util::atomic_write(&path, &new_content)).await??;
+    tokio::task::spawn_blocking(move || {
+        fs_util::atomic_write(&path, &new_content)?;
+        #[cfg(unix)]
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
+        Ok::<(), anyhow::Error>(())
+    })
+    .await??;
 
     Ok((access_token, info))
 }
@@ -208,7 +217,13 @@ pub async fn refresh_credentials_if_expired(path: &Path) -> Result<String> {
     let refreshed = serde_json::to_string_pretty(&raw)?;
     let path = path.to_owned();
     let write_content = refreshed.clone();
-    tokio::task::spawn_blocking(move || fs_util::atomic_write(&path, &write_content)).await??;
+    tokio::task::spawn_blocking(move || {
+        fs_util::atomic_write(&path, &write_content)?;
+        #[cfg(unix)]
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
+        Ok::<(), anyhow::Error>(())
+    })
+    .await??;
     Ok(refreshed)
 }
 
@@ -275,5 +290,22 @@ mod tests {
                 .resets_at
                 .is_none()
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_write_with_permissions_sets_0o600() {
+        use std::os::unix::fs::PermissionsExt;
+
+        use crate::fs_util;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("credentials.json");
+
+        fs_util::atomic_write(&path, r#"{"claudeAiOauth":{}}"#).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "credential file should be owner-only (0o600)");
     }
 }

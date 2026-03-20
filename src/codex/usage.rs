@@ -1,3 +1,6 @@
+use std::fs;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
 use anyhow::{Result, anyhow};
@@ -161,7 +164,13 @@ async fn fetch_from_auth_path(path: &Path) -> Result<Option<RateLimits>> {
 
     let path = path.to_owned();
     let serialized = serde_json::to_string_pretty(&raw)?;
-    tokio::task::spawn_blocking(move || fs_util::atomic_write(&path, &serialized)).await??;
+    tokio::task::spawn_blocking(move || {
+        fs_util::atomic_write(&path, &serialized)?;
+        #[cfg(unix)]
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
+        Ok::<(), anyhow::Error>(())
+    })
+    .await??;
 
     let new_tokens = read_tokens(&raw)?;
     let resp = fetch_usage_api(&new_tokens).await?;
@@ -227,5 +236,20 @@ mod tests {
         let raw: Value = serde_json::json!({});
         let err = read_tokens(&raw).unwrap_err();
         assert!(err.to_string().contains("no tokens in auth.json"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_write_with_permissions_sets_0o600() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.json");
+
+        fs_util::atomic_write(&path, r#"{"tokens":{}}"#).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+
+        let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "credential file should be owner-only (0o600)");
     }
 }
