@@ -15,7 +15,7 @@ use crate::http::shared_client;
 use crate::tool::Tool;
 
 const CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
-const TOKEN_URL: &str = "https://console.anthropic.com/v1/oauth/token";
+const TOKEN_URL: &str = "https://platform.claude.com/v1/oauth/token";
 
 #[derive(Debug, Deserialize)]
 struct OAuthData {
@@ -25,6 +25,9 @@ struct OAuthData {
     refresh_token: Option<String>,
     #[serde(rename = "expiresAt")]
     expires_at: Option<u64>,
+    #[serde(rename = "subscriptionType")]
+    subscription_type: Option<String>,
+    /// Legacy field name kept for backward compatibility with old credentials.
     #[serde(rename = "planType")]
     plan_type: Option<String>,
 }
@@ -174,7 +177,7 @@ async fn get_access_token_from_credentials(
     let oauth = read_oauth(&raw)?;
 
     let info = ProfileInfo {
-        plan_type: oauth.plan_type.clone(),
+        plan_type: oauth.subscription_type.clone().or(oauth.plan_type.clone()),
     };
 
     // For the current profile, always use the token as-is. aip is read-only
@@ -398,6 +401,7 @@ mod tests {
             access_token: "tok".to_string(),
             refresh_token: None,
             expires_at: None,
+            subscription_type: None,
             plan_type: None,
         };
         assert!(!is_token_expired(&oauth));
@@ -409,6 +413,7 @@ mod tests {
             access_token: "tok".to_string(),
             refresh_token: None,
             expires_at: Some(0),
+            subscription_type: None,
             plan_type: None,
         };
         assert!(is_token_expired(&oauth));
@@ -420,6 +425,7 @@ mod tests {
             access_token: "tok".to_string(),
             refresh_token: None,
             expires_at: Some(u64::MAX),
+            subscription_type: None,
             plan_type: None,
         };
         assert!(!is_token_expired(&oauth));
@@ -428,7 +434,25 @@ mod tests {
     // --- read_oauth tests ---
 
     #[test]
-    fn read_oauth_full_payload() {
+    fn read_oauth_full_payload_with_subscription_type() {
+        let raw: Value = serde_json::json!({
+            "claudeAiOauth": {
+                "accessToken": "acc",
+                "refreshToken": "ref",
+                "expiresAt": 1234567890,
+                "subscriptionType": "max"
+            }
+        });
+        let oauth = read_oauth(&raw).unwrap();
+        assert_eq!(oauth.access_token, "acc");
+        assert_eq!(oauth.refresh_token.as_deref(), Some("ref"));
+        assert_eq!(oauth.expires_at, Some(1234567890));
+        assert_eq!(oauth.subscription_type.as_deref(), Some("max"));
+        assert!(oauth.plan_type.is_none());
+    }
+
+    #[test]
+    fn read_oauth_full_payload_with_legacy_plan_type() {
         let raw: Value = serde_json::json!({
             "claudeAiOauth": {
                 "accessToken": "acc",
@@ -441,6 +465,7 @@ mod tests {
         assert_eq!(oauth.access_token, "acc");
         assert_eq!(oauth.refresh_token.as_deref(), Some("ref"));
         assert_eq!(oauth.expires_at, Some(1234567890));
+        assert!(oauth.subscription_type.is_none());
         assert_eq!(oauth.plan_type.as_deref(), Some("pro"));
     }
 
@@ -462,6 +487,7 @@ mod tests {
         assert_eq!(oauth.access_token, "acc");
         assert!(oauth.refresh_token.is_none());
         assert!(oauth.expires_at.is_none());
+        assert!(oauth.subscription_type.is_none());
         assert!(oauth.plan_type.is_none());
     }
 

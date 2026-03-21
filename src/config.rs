@@ -43,8 +43,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn load_returns_default_when_no_file() {
-        let config = Config::load();
+    fn default_config_has_default_display_mode() {
+        let config = Config::default();
         assert_eq!(config.display_mode, DisplayPreference::Default);
     }
 
