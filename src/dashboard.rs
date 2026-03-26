@@ -706,13 +706,18 @@ pub async fn cmd_dashboard() -> Result<()> {
                                 // The current profile's token is managed by Claude Code.
                                 let current =
                                     Tool::Claude.current_profile().ok().flatten();
-                                if current.as_deref() != Some(profile.as_str()) {
-                                    let _ =
+                                if current.as_deref() != Some(profile.as_str())
+                                    && let Err(e) =
                                         claude::usage::refresh_credentials_if_expired(
                                             &dir.join("credentials.json"),
                                         )
-                                        .await;
-                                }
+                                        .await
+                                    {
+                                        eprintln!(
+                                            "Warning: token refresh failed for '{}': {}",
+                                            profile, e
+                                        );
+                                    }
                             }
                             let profile = profile.clone();
                             match tokio::task::spawn_blocking(move || {

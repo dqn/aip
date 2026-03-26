@@ -25,6 +25,8 @@ struct OAuthData {
     refresh_token: Option<String>,
     #[serde(rename = "expiresAt")]
     expires_at: Option<u64>,
+    #[serde(default)]
+    scopes: Vec<String>,
     #[serde(rename = "subscriptionType")]
     subscription_type: Option<String>,
     /// Legacy field name kept for backward compatibility with old credentials.
@@ -90,11 +92,26 @@ fn is_token_expired(oauth: &OAuthData) -> bool {
     }
 }
 
+/// Default scopes matching Claude Code's OAuth configuration.
+const DEFAULT_SCOPES: &[&str] = &[
+    "user:profile",
+    "user:inference",
+    "user:sessions:claude_code",
+    "user:mcp_servers",
+    "user:file_upload",
+];
+
 async fn refresh_token(oauth: &OAuthData) -> Result<TokenResponse> {
     let refresh_token = oauth
         .refresh_token
         .as_ref()
         .ok_or_else(|| anyhow!("no refresh token available"))?;
+
+    let scope = if oauth.scopes.is_empty() {
+        DEFAULT_SCOPES.join(" ")
+    } else {
+        oauth.scopes.join(" ")
+    };
 
     let resp = shared_client()
         .post(TOKEN_URL)
@@ -102,6 +119,7 @@ async fn refresh_token(oauth: &OAuthData) -> Result<TokenResponse> {
             ("grant_type", "refresh_token"),
             ("refresh_token", refresh_token.as_str()),
             ("client_id", CLIENT_ID),
+            ("scope", &scope),
         ])
         .send()
         .await?;
@@ -401,6 +419,7 @@ mod tests {
             access_token: "tok".to_string(),
             refresh_token: None,
             expires_at: None,
+            scopes: vec![],
             subscription_type: None,
             plan_type: None,
         };
@@ -413,6 +432,7 @@ mod tests {
             access_token: "tok".to_string(),
             refresh_token: None,
             expires_at: Some(0),
+            scopes: vec![],
             subscription_type: None,
             plan_type: None,
         };
@@ -425,6 +445,7 @@ mod tests {
             access_token: "tok".to_string(),
             refresh_token: None,
             expires_at: Some(u64::MAX),
+            scopes: vec![],
             subscription_type: None,
             plan_type: None,
         };
@@ -440,13 +461,15 @@ mod tests {
                 "accessToken": "acc",
                 "refreshToken": "ref",
                 "expiresAt": 1234567890,
-                "subscriptionType": "max"
+                "subscriptionType": "max",
+                "scopes": ["user:inference", "user:profile"]
             }
         });
         let oauth = read_oauth(&raw).unwrap();
         assert_eq!(oauth.access_token, "acc");
         assert_eq!(oauth.refresh_token.as_deref(), Some("ref"));
         assert_eq!(oauth.expires_at, Some(1234567890));
+        assert_eq!(oauth.scopes, vec!["user:inference", "user:profile"]);
         assert_eq!(oauth.subscription_type.as_deref(), Some("max"));
         assert!(oauth.plan_type.is_none());
     }
@@ -487,6 +510,7 @@ mod tests {
         assert_eq!(oauth.access_token, "acc");
         assert!(oauth.refresh_token.is_none());
         assert!(oauth.expires_at.is_none());
+        assert!(oauth.scopes.is_empty());
         assert!(oauth.subscription_type.is_none());
         assert!(oauth.plan_type.is_none());
     }
