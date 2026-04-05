@@ -713,10 +713,11 @@ pub async fn cmd_dashboard() -> Result<()> {
                                         )
                                         .await
                                     {
-                                        eprintln!(
-                                            "Warning: token refresh failed for '{}': {}",
+                                        status_message = Some(format!(
+                                            "Token refresh failed for '{}': {}",
                                             profile, e
-                                        );
+                                        ));
+                                        continue;
                                     }
                             }
                             let profile = profile.clone();

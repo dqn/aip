@@ -88,7 +88,9 @@ fn is_token_expired(oauth: &OAuthData) -> bool {
             let now_ms = Utc::now().timestamp_millis().max(0) as u64;
             now_ms.saturating_add(300_000) >= expires_at
         }
-        None => false,
+        // No expiry info means the token was saved without expiresAt (e.g. from
+        // Keychain). Treat as expired so we always attempt a refresh.
+        None => true,
     }
 }
 
@@ -414,7 +416,7 @@ mod tests {
     // --- is_token_expired tests ---
 
     #[test]
-    fn is_token_expired_none_returns_false() {
+    fn is_token_expired_none_returns_true() {
         let oauth = OAuthData {
             access_token: "tok".to_string(),
             refresh_token: None,
@@ -423,7 +425,7 @@ mod tests {
             subscription_type: None,
             plan_type: None,
         };
-        assert!(!is_token_expired(&oauth));
+        assert!(is_token_expired(&oauth));
     }
 
     #[test]
