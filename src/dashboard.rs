@@ -497,6 +497,21 @@ fn switch_profile(tool: Tool, profile: &str) -> Result<()> {
     }
 }
 
+fn normalize_key(key: Key) -> Key {
+    match key {
+        Key::Char(c) => Key::Char(normalize_command_char(c)),
+        _ => key,
+    }
+}
+
+fn normalize_command_char(c: char) -> char {
+    match c {
+        '\u{3000}' => ' ',
+        '\u{FF01}'..='\u{FF5E}' => char::from_u32(c as u32 - 0xFEE0).unwrap_or(c),
+        _ => c,
+    }
+}
+
 fn handle_dashboard_key(
     key: Key,
     selected: &mut usize,
@@ -506,6 +521,8 @@ fn handle_dashboard_key(
     status_message: &mut Option<String>,
     display_preference: &mut DisplayPreference,
 ) -> DashboardAction {
+    let key = normalize_key(key);
+
     if selectable_items.is_empty() {
         return match key {
             Key::Char('r') => DashboardAction::Refresh,
@@ -1241,6 +1258,15 @@ mod tests {
     }
 
     #[test]
+    fn normalize_command_char_converts_full_width_ascii() {
+        assert_eq!(normalize_command_char('ｑ'), 'q');
+        assert_eq!(normalize_command_char('Ｊ'), 'J');
+        assert_eq!(normalize_command_char('！'), '!');
+        assert_eq!(normalize_command_char('　'), ' ');
+        assert_eq!(normalize_command_char('あ'), 'あ');
+    }
+
+    #[test]
     fn handle_dashboard_key_navigates_with_arrow_keys() {
         let tool_profiles = sample_tool_profiles();
         let selectable_items = build_selectable_items(&tool_profiles);
@@ -1416,6 +1442,76 @@ mod tests {
             &mut DisplayPreference::Default,
         );
         assert!(matches!(action, DashboardAction::Quit));
+    }
+
+    #[test]
+    fn handle_dashboard_key_triggers_on_full_width_shortcuts() {
+        let tool_profiles = sample_tool_profiles();
+        let selectable_items = build_selectable_items(&tool_profiles);
+        let mut selected = 0;
+        let mut mode = DashboardMode::Normal;
+        let mut status_message = None;
+        let mut display_pref = DisplayPreference::Default;
+
+        let action = handle_dashboard_key(
+            Key::Char('ｄ'),
+            &mut selected,
+            &mut mode,
+            &selectable_items,
+            &tool_profiles,
+            &mut status_message,
+            &mut display_pref,
+        );
+        assert!(matches!(action, DashboardAction::Render));
+        assert_eq!(display_pref, DisplayPreference::Used);
+
+        let action = handle_dashboard_key(
+            Key::Char('ｒ'),
+            &mut selected,
+            &mut mode,
+            &selectable_items,
+            &tool_profiles,
+            &mut status_message,
+            &mut display_pref,
+        );
+        assert!(matches!(action, DashboardAction::Refresh));
+
+        let action = handle_dashboard_key(
+            Key::Char('ｑ'),
+            &mut selected,
+            &mut mode,
+            &selectable_items,
+            &tool_profiles,
+            &mut status_message,
+            &mut display_pref,
+        );
+        assert!(matches!(action, DashboardAction::Quit));
+
+        selected = 1;
+        mode = DashboardMode::Normal;
+        let action = handle_dashboard_key(
+            Key::Char('　'),
+            &mut selected,
+            &mut mode,
+            &selectable_items,
+            &tool_profiles,
+            &mut status_message,
+            &mut display_pref,
+        );
+        assert!(matches!(action, DashboardAction::Switch(Tool::Claude, ref p) if p == "work"));
+
+        mode = DashboardMode::DeleteConfirm(1);
+        let action = handle_dashboard_key(
+            Key::Char('ｎ'),
+            &mut selected,
+            &mut mode,
+            &selectable_items,
+            &tool_profiles,
+            &mut status_message,
+            &mut display_pref,
+        );
+        assert!(matches!(action, DashboardAction::Render));
+        assert!(matches!(mode, DashboardMode::Normal));
     }
 
     #[test]
