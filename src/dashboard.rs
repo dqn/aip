@@ -14,6 +14,11 @@ use crate::display::{DisplayMode, DisplayPreference, format_usage_line};
 use crate::tool::Tool;
 
 const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+const CTRL_D: char = '\u{4}';
+const CTRL_N: char = '\u{e}';
+const CTRL_Q: char = '\u{11}';
+const CTRL_R: char = '\u{12}';
+const CTRL_Y: char = '\u{19}';
 
 #[derive(Clone, Debug, PartialEq)]
 enum UsageLine {
@@ -408,13 +413,16 @@ impl DashboardView<'_> {
         match self.mode {
             DashboardMode::Normal => {
                 lines.push(
-                    "[R] Refresh  [D] Display  [↑↓] Navigate  [Enter/Space] Switch  [BS/Del] Delete  [Shift+J/K] Reorder  [ESC/q] Quit"
+                    "[R/Ctrl+R] Refresh  [D/Ctrl+D] Display  [↑↓] Navigate  [Enter/Space] Switch  [BS/Del] Delete  [Shift+J/K] Reorder  [ESC/q/Ctrl+Q] Quit"
                         .to_string(),
                 );
             }
             DashboardMode::DeleteConfirm(idx) => {
                 if let Some((tool, profile)) = self.selectable_items.get(*idx) {
-                    lines.push(format!("Delete '{}' for {}? [y/n]", profile, tool));
+                    lines.push(format!(
+                        "Delete '{}' for {}? [y/n or Ctrl+Y/N]",
+                        profile, tool
+                    ));
                 }
             }
         }
@@ -512,6 +520,26 @@ fn normalize_command_char(c: char) -> char {
     }
 }
 
+fn is_refresh_key(key: &Key) -> bool {
+    matches!(key, Key::Char('r') | Key::Char(CTRL_R))
+}
+
+fn is_display_key(key: &Key) -> bool {
+    matches!(key, Key::Char('d') | Key::Char(CTRL_D))
+}
+
+fn is_quit_key(key: &Key) -> bool {
+    matches!(key, Key::Escape | Key::Char('q') | Key::Char(CTRL_Q))
+}
+
+fn is_confirm_delete_key(key: &Key) -> bool {
+    matches!(key, Key::Char('y') | Key::Char(CTRL_Y))
+}
+
+fn is_cancel_delete_key(key: &Key) -> bool {
+    matches!(key, Key::Escape | Key::Char('n') | Key::Char(CTRL_N))
+}
+
 fn handle_dashboard_key(
     key: Key,
     selected: &mut usize,
@@ -524,76 +552,83 @@ fn handle_dashboard_key(
     let key = normalize_key(key);
 
     if selectable_items.is_empty() {
-        return match key {
-            Key::Char('r') => DashboardAction::Refresh,
-            Key::Char('d') => {
-                *display_preference = display_preference.next();
-                DashboardAction::Render
-            }
-            Key::Escape | Key::Char('q') => DashboardAction::Quit,
-            _ => DashboardAction::None,
-        };
+        if is_refresh_key(&key) {
+            return DashboardAction::Refresh;
+        }
+        if is_display_key(&key) {
+            *display_preference = display_preference.next();
+            return DashboardAction::Render;
+        }
+        if is_quit_key(&key) {
+            return DashboardAction::Quit;
+        }
+        return DashboardAction::None;
     }
 
     match mode {
-        DashboardMode::Normal => match key {
-            Key::ArrowUp => {
-                *selected = selected.saturating_sub(1);
-                DashboardAction::Render
+        DashboardMode::Normal => {
+            if is_refresh_key(&key) {
+                return DashboardAction::Refresh;
             }
-            Key::ArrowDown => {
-                if *selected < selectable_items.len() - 1 {
-                    *selected += 1;
-                }
-                DashboardAction::Render
-            }
-            Key::Enter | Key::Char(' ') => {
-                let (tool, profile) = &selectable_items[*selected];
-                if is_current_profile(tool_profiles, *tool, profile) {
-                    return DashboardAction::None;
-                }
-                DashboardAction::Switch(*tool, profile.clone())
-            }
-            Key::Backspace | Key::Del => {
-                let (tool, profile) = &selectable_items[*selected];
-                if is_current_profile(tool_profiles, *tool, profile) {
-                    return DashboardAction::None;
-                }
-                *mode = DashboardMode::DeleteConfirm(*selected);
-                DashboardAction::Render
-            }
-            Key::Char('r') => DashboardAction::Refresh,
-            Key::Char('d') => {
+            if is_display_key(&key) {
                 *display_preference = display_preference.next();
-                DashboardAction::Render
+                return DashboardAction::Render;
             }
-            Key::Char('K') => handle_move(selected, selectable_items, tool_profiles, -1),
-            Key::Char('J') => handle_move(selected, selectable_items, tool_profiles, 1),
-            Key::Escape | Key::Char('q') => DashboardAction::Quit,
-            _ => DashboardAction::None,
-        },
-        DashboardMode::DeleteConfirm(idx) => {
-            let idx = *idx;
+            if is_quit_key(&key) {
+                return DashboardAction::Quit;
+            }
+
             match key {
-                Key::Char('y') => {
-                    *mode = DashboardMode::Normal;
-                    match selectable_items.get(idx) {
-                        Some((tool, profile)) => match tool.delete_profile(profile) {
-                            Ok(()) => DashboardAction::RefreshAfterDelete,
-                            Err(e) => {
-                                *status_message = Some(format!("Failed to delete profile: {}", e));
-                                DashboardAction::Render
-                            }
-                        },
-                        None => DashboardAction::Render,
-                    }
-                }
-                Key::Char('n') | Key::Escape => {
-                    *mode = DashboardMode::Normal;
+                Key::ArrowUp => {
+                    *selected = selected.saturating_sub(1);
                     DashboardAction::Render
                 }
+                Key::ArrowDown => {
+                    if *selected < selectable_items.len() - 1 {
+                        *selected += 1;
+                    }
+                    DashboardAction::Render
+                }
+                Key::Enter | Key::Char(' ') => {
+                    let (tool, profile) = &selectable_items[*selected];
+                    if is_current_profile(tool_profiles, *tool, profile) {
+                        return DashboardAction::None;
+                    }
+                    DashboardAction::Switch(*tool, profile.clone())
+                }
+                Key::Backspace | Key::Del => {
+                    let (tool, profile) = &selectable_items[*selected];
+                    if is_current_profile(tool_profiles, *tool, profile) {
+                        return DashboardAction::None;
+                    }
+                    *mode = DashboardMode::DeleteConfirm(*selected);
+                    DashboardAction::Render
+                }
+                Key::Char('K') => handle_move(selected, selectable_items, tool_profiles, -1),
+                Key::Char('J') => handle_move(selected, selectable_items, tool_profiles, 1),
                 _ => DashboardAction::None,
             }
+        }
+        DashboardMode::DeleteConfirm(idx) => {
+            let idx = *idx;
+            if is_confirm_delete_key(&key) {
+                *mode = DashboardMode::Normal;
+                return match selectable_items.get(idx) {
+                    Some((tool, profile)) => match tool.delete_profile(profile) {
+                        Ok(()) => DashboardAction::RefreshAfterDelete,
+                        Err(e) => {
+                            *status_message = Some(format!("Failed to delete profile: {}", e));
+                            DashboardAction::Render
+                        }
+                    },
+                    None => DashboardAction::Render,
+                };
+            }
+            if is_cancel_delete_key(&key) {
+                *mode = DashboardMode::Normal;
+                return DashboardAction::Render;
+            }
+            DashboardAction::None
         }
     }
 }
@@ -1219,6 +1254,9 @@ mod tests {
         );
 
         let footer = lines.last().unwrap();
+        assert!(footer.contains("Ctrl+R"));
+        assert!(footer.contains("Ctrl+D"));
+        assert!(footer.contains("Ctrl+Q"));
         assert!(footer.contains("Navigate"));
         assert!(footer.contains("Reorder"));
         assert!(footer.contains("Switch"));
@@ -1246,7 +1284,7 @@ mod tests {
         );
 
         let footer = lines.last().unwrap();
-        assert!(footer.contains("Delete 'work' for Claude Code? [y/n]"));
+        assert!(footer.contains("Delete 'work' for Claude Code? [y/n or Ctrl+Y/N]"));
     }
 
     #[test]
@@ -1503,6 +1541,63 @@ mod tests {
         mode = DashboardMode::DeleteConfirm(1);
         let action = handle_dashboard_key(
             Key::Char('ｎ'),
+            &mut selected,
+            &mut mode,
+            &selectable_items,
+            &tool_profiles,
+            &mut status_message,
+            &mut display_pref,
+        );
+        assert!(matches!(action, DashboardAction::Render));
+        assert!(matches!(mode, DashboardMode::Normal));
+    }
+
+    #[test]
+    fn handle_dashboard_key_triggers_on_ctrl_shortcuts() {
+        let tool_profiles = sample_tool_profiles();
+        let selectable_items = build_selectable_items(&tool_profiles);
+        let mut selected = 0;
+        let mut mode = DashboardMode::Normal;
+        let mut status_message = None;
+        let mut display_pref = DisplayPreference::Default;
+
+        let action = handle_dashboard_key(
+            Key::Char(CTRL_D),
+            &mut selected,
+            &mut mode,
+            &selectable_items,
+            &tool_profiles,
+            &mut status_message,
+            &mut display_pref,
+        );
+        assert!(matches!(action, DashboardAction::Render));
+        assert_eq!(display_pref, DisplayPreference::Used);
+
+        let action = handle_dashboard_key(
+            Key::Char(CTRL_R),
+            &mut selected,
+            &mut mode,
+            &selectable_items,
+            &tool_profiles,
+            &mut status_message,
+            &mut display_pref,
+        );
+        assert!(matches!(action, DashboardAction::Refresh));
+
+        let action = handle_dashboard_key(
+            Key::Char(CTRL_Q),
+            &mut selected,
+            &mut mode,
+            &selectable_items,
+            &tool_profiles,
+            &mut status_message,
+            &mut display_pref,
+        );
+        assert!(matches!(action, DashboardAction::Quit));
+
+        mode = DashboardMode::DeleteConfirm(1);
+        let action = handle_dashboard_key(
+            Key::Char(CTRL_N),
             &mut selected,
             &mut mode,
             &selectable_items,
