@@ -19,13 +19,12 @@ fn main() -> Result<()> {
     let rt = tokio::runtime::Runtime::new()?;
     let result = rt.block_on(async {
         let cli = Cli::parse_from(cli::normalize_short_flags(std::env::args_os()));
-
-        match cli.command {
-            None => dashboard::cmd_dashboard().await?,
-            Some(Command::Save { tool, profile }) => cmd_save(tool, profile)?,
-        }
-
-        Ok(())
+        let result = match cli.command {
+            None => dashboard::cmd_dashboard().await,
+            Some(Command::Save { tool, profile }) => cmd_save(tool, profile),
+        };
+        claude::usage::finish_pending_refresh().await;
+        result
     });
 
     // Don't wait for the blocking key-reader thread to finish.

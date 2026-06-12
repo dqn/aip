@@ -141,7 +141,7 @@ async fn prefetch_claude_usage() -> UsageCache {
                         }
                     } else {
                         ProfileUsageCache {
-                            usage_lines: vec![UsageLine::Text(format!("Error: {}", e))],
+                            usage_lines: vec![UsageLine::Text(format!("Error: {:#}", e))],
                             plan_type: None,
                             is_stale: true,
                         }
@@ -731,7 +731,7 @@ pub async fn cmd_dashboard() -> Result<()> {
                                         .await
                                     {
                                         status_message = Some(format!(
-                                            "Token refresh failed for '{}': {}",
+                                            "Token refresh failed for '{}': {:#}",
                                             profile, e
                                         ));
                                         continue;

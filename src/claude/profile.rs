@@ -161,6 +161,33 @@ pub fn sync_keychain_to_current_profile() {
     let _ = fs::set_permissions(&dest, fs::Permissions::from_mode(0o600));
 }
 
+pub fn save(name: &str) -> Result<()> {
+    let data = read_keychain()?;
+
+    let dest_dir = TOOL.profile_dir(name)?;
+    let newly_created = !dest_dir.exists();
+    fs::create_dir_all(&dest_dir)?;
+
+    let result = (|| -> Result<()> {
+        let creds_path = dest_dir.join("credentials.json");
+        fs_util::atomic_write(&creds_path, &data)?;
+        #[cfg(unix)]
+        fs::set_permissions(&creds_path, fs::Permissions::from_mode(0o600))?;
+
+        // Update current profile to the newly saved one
+        let current_file = TOOL.current_file()?;
+        fs_util::atomic_write(&current_file, &format!("{}\n", name))?;
+
+        Ok(())
+    })();
+
+    if result.is_err() && newly_created {
+        let _ = fs::remove_dir_all(&dest_dir);
+    }
+
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -310,31 +337,4 @@ mod tests {
     fn encode_hex_produces_lowercase_hex() {
         assert_eq!(encode_hex("AB"), "4142");
     }
-}
-
-pub fn save(name: &str) -> Result<()> {
-    let data = read_keychain()?;
-
-    let dest_dir = TOOL.profile_dir(name)?;
-    let newly_created = !dest_dir.exists();
-    fs::create_dir_all(&dest_dir)?;
-
-    let result = (|| -> Result<()> {
-        let creds_path = dest_dir.join("credentials.json");
-        fs_util::atomic_write(&creds_path, &data)?;
-        #[cfg(unix)]
-        fs::set_permissions(&creds_path, fs::Permissions::from_mode(0o600))?;
-
-        // Update current profile to the newly saved one
-        let current_file = TOOL.current_file()?;
-        fs_util::atomic_write(&current_file, &format!("{}\n", name))?;
-
-        Ok(())
-    })();
-
-    if result.is_err() && newly_created {
-        let _ = fs::remove_dir_all(&dest_dir);
-    }
-
-    result
 }

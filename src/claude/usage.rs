@@ -3,6 +3,7 @@ use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
@@ -16,6 +17,15 @@ use crate::tool::Tool;
 
 const CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
 const TOKEN_URL: &str = "https://platform.claude.com/v1/oauth/token";
+
+/// In-process gate: serializes all token refreshes so two tasks cannot spend
+/// the same (single-use) refresh token simultaneously.
+static REFRESH_GATE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Set to true by `finish_pending_refresh` once the runtime is shutting down.
+/// Queued refreshes see this flag and bail out rather than starting a new
+/// rotation whose file-write could be aborted mid-flight.
+static SHUTTING_DOWN: AtomicBool = AtomicBool::new(false);
 
 #[derive(Debug, Deserialize)]
 struct OAuthData {
@@ -152,6 +162,99 @@ fn apply_token_response(raw: &mut Value, token_resp: &TokenResponse) -> Result<(
     Ok(())
 }
 
+/// Appends `.lock` to the full filename of `path`.
+///
+/// `path.with_extension("lock")` on `credentials.json` yields `credentials.lock`,
+/// which strips the `.json` part. This helper preserves the full filename.
+fn lock_path(path: &Path) -> std::path::PathBuf {
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(".lock");
+    path.with_file_name(name)
+}
+
+/// Load credentials from `path`, refreshing the OAuth tokens if expired.
+///
+/// Refresh rotates the refresh token (single-use), so all refreshes are
+/// serialized through an in-process gate plus a cross-process file lock,
+/// and the expiry is re-checked after acquiring them. This prevents two
+/// concurrent refreshes from spending the same refresh token, which would
+/// invalidate the credential family.
+pub(crate) async fn load_fresh_credentials(path: &Path) -> Result<Value> {
+    // Fast path: read once without any lock.
+    let content = tokio::fs::read_to_string(path).await?;
+    let mut raw: Value = serde_json::from_str(&content)?;
+    let oauth = read_oauth(&raw)?;
+    if !is_token_expired(&oauth) {
+        return Ok(raw);
+    }
+
+    // Serialize in-process refreshes.
+    let _gate = REFRESH_GATE.lock().await;
+
+    // Do not start a rotation during shutdown: the write could be aborted
+    // mid-flight, losing the newly issued refresh token.
+    if SHUTTING_DOWN.load(Ordering::SeqCst) {
+        return Ok(raw);
+    }
+
+    // Acquire a cross-process advisory lock to prevent two aip processes
+    // from spending the same (single-use) refresh token concurrently.
+    let lock_file_path = lock_path(path);
+    // The lock file carries no content; it exists only to be flock()ed.
+    let lock_file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(&lock_file_path)?;
+    let mut fl = fd_lock::RwLock::new(lock_file);
+
+    // Poll until the exclusive write lock is available (another process may
+    // hold it while performing its own refresh).
+    let lock_guard = {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            match fl.try_write() {
+                Ok(guard) => break guard,
+                Err(_) => {
+                    if std::time::Instant::now() >= deadline {
+                        return Err(anyhow!(
+                            "timed out waiting for credentials lock \
+                             (another aip process may be refreshing)"
+                        ));
+                    }
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+            }
+        }
+    };
+
+    // Re-read under both locks: another task/process may have already refreshed.
+    let content2 = tokio::fs::read_to_string(path).await?;
+    raw = serde_json::from_str(&content2)?;
+    let oauth2 = read_oauth(&raw)?;
+    if !is_token_expired(&oauth2) {
+        drop(lock_guard);
+        return Ok(raw);
+    }
+
+    // Perform the actual token refresh.
+    let token_resp = refresh_token(&oauth2).await?;
+    apply_token_response(&mut raw, &token_resp)?;
+
+    let new_content = serde_json::to_string_pretty(&raw)?;
+    let path_owned = path.to_owned();
+    tokio::task::spawn_blocking(move || {
+        fs_util::atomic_write(&path_owned, &new_content)?;
+        #[cfg(unix)]
+        fs::set_permissions(&path_owned, fs::Permissions::from_mode(0o600))?;
+        Ok::<(), anyhow::Error>(())
+    })
+    .await??;
+
+    drop(lock_guard);
+    Ok(raw)
+}
+
 pub async fn fetch_usage_with_token(token: &str) -> Result<UsageResponse> {
     if token.is_empty() {
         return Err(anyhow!("access token is empty"));
@@ -193,7 +296,7 @@ async fn get_access_token_from_credentials(
     is_current: bool,
 ) -> Result<(String, ProfileInfo)> {
     let content = tokio::fs::read_to_string(path).await?;
-    let mut raw: Value = serde_json::from_str(&content)?;
+    let raw: Value = serde_json::from_str(&content)?;
     let oauth = read_oauth(&raw)?;
 
     let info = ProfileInfo {
@@ -208,46 +311,26 @@ async fn get_access_token_from_credentials(
         return Ok((oauth.access_token, info));
     }
 
-    let token_resp = refresh_token(&oauth)
+    let refreshed = load_fresh_credentials(path)
         .await
         .context("Refresh token expired (switch to this profile to re-auth)")?;
-    let access_token = token_resp.access_token.clone();
-    apply_token_response(&mut raw, &token_resp)?;
-    let new_content = serde_json::to_string_pretty(&raw)?;
-    let path = path.to_owned();
-    tokio::task::spawn_blocking(move || {
-        fs_util::atomic_write(&path, &new_content)?;
-        #[cfg(unix)]
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
-        Ok::<(), anyhow::Error>(())
-    })
-    .await??;
-
+    let access_token = read_oauth(&refreshed)?.access_token;
     Ok((access_token, info))
 }
 
 pub async fn refresh_credentials_if_expired(path: &Path) -> Result<String> {
-    let content = tokio::fs::read_to_string(path).await?;
-    let mut raw: Value = serde_json::from_str(&content)?;
-    let oauth = read_oauth(&raw)?;
+    let raw = load_fresh_credentials(path).await?;
+    Ok(serde_json::to_string_pretty(&raw)?)
+}
 
-    if !is_token_expired(&oauth) {
-        return Ok(content);
-    }
-
-    let token_resp = refresh_token(&oauth).await?;
-    apply_token_response(&mut raw, &token_resp)?;
-    let refreshed = serde_json::to_string_pretty(&raw)?;
-    let path = path.to_owned();
-    let write_content = refreshed.clone();
-    tokio::task::spawn_blocking(move || {
-        fs_util::atomic_write(&path, &write_content)?;
-        #[cfg(unix)]
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
-        Ok::<(), anyhow::Error>(())
-    })
-    .await??;
-    Ok(refreshed)
+/// Wait for any in-flight token refresh to finish persisting.
+///
+/// Called before the runtime is shut down: an aborted refresh task would
+/// lose a freshly rotated refresh token. Sets a flag so queued refreshes
+/// bail out instead of starting new rotations.
+pub async fn finish_pending_refresh() {
+    SHUTTING_DOWN.store(true, Ordering::SeqCst);
+    let _ = tokio::time::timeout(Duration::from_secs(10), REFRESH_GATE.lock()).await;
 }
 
 pub async fn fetch_all_profiles_usage() -> HashMap<String, Result<(UsageResponse, ProfileInfo)>> {
@@ -300,6 +383,102 @@ pub async fn fetch_all_profiles_usage() -> HashMap<String, Result<(UsageResponse
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --- load_fresh_credentials tests ---
+
+    fn far_future_credentials() -> serde_json::Value {
+        serde_json::json!({
+            "claudeAiOauth": {
+                "accessToken": "access_tok",
+                "refreshToken": "refresh_tok",
+                "expiresAt": u64::MAX,
+                "scopes": ["user:inference"],
+                "subscriptionType": "pro"
+            }
+        })
+    }
+
+    fn expired_credentials() -> serde_json::Value {
+        serde_json::json!({
+            "claudeAiOauth": {
+                "accessToken": "old_access",
+                "refreshToken": "old_refresh",
+                "expiresAt": 0
+            }
+        })
+    }
+
+    /// `load_fresh_credentials` with a far-future `expiresAt` returns the file
+    /// content unchanged without touching the file or making network calls.
+    #[tokio::test]
+    async fn load_fresh_credentials_fresh_token_returns_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("credentials.json");
+        let creds = far_future_credentials();
+        let original = serde_json::to_string_pretty(&creds).unwrap();
+        std::fs::write(&path, &original).unwrap();
+
+        let result = load_fresh_credentials(&path).await.unwrap();
+
+        // Value round-trips correctly.
+        assert_eq!(result["claudeAiOauth"]["accessToken"], "access_tok");
+
+        // File must not have been modified.
+        let on_disk = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(on_disk, original);
+    }
+
+    /// `load_fresh_credentials` with an expired token while `SHUTTING_DOWN` is
+    /// true returns the on-disk value unchanged without attempting any network call.
+    #[tokio::test]
+    async fn load_fresh_credentials_expired_during_shutdown_returns_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("credentials.json");
+        let creds = expired_credentials();
+        let original = serde_json::to_string_pretty(&creds).unwrap();
+        std::fs::write(&path, &original).unwrap();
+
+        // Set shutdown flag.
+        SHUTTING_DOWN.store(true, Ordering::SeqCst);
+
+        let result = load_fresh_credentials(&path).await.unwrap();
+
+        // Restore for other tests.
+        SHUTTING_DOWN.store(false, Ordering::SeqCst);
+
+        // Access token must be the original one (no refresh attempted).
+        assert_eq!(result["claudeAiOauth"]["accessToken"], "old_access");
+
+        // File must not have been modified.
+        let on_disk = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(on_disk, original);
+    }
+
+    /// Two concurrent `load_fresh_credentials` calls on the same fresh-token
+    /// file both succeed (sanity check for the locking path on the fast path).
+    #[tokio::test]
+    async fn load_fresh_credentials_concurrent_fresh_token_both_succeed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("credentials.json");
+        let creds = far_future_credentials();
+        let original = serde_json::to_string_pretty(&creds).unwrap();
+        std::fs::write(&path, &original).unwrap();
+
+        let path1 = path.clone();
+        let path2 = path.clone();
+
+        let (r1, r2) = tokio::join!(
+            load_fresh_credentials(&path1),
+            load_fresh_credentials(&path2),
+        );
+
+        assert!(r1.is_ok(), "first call failed: {:?}", r1.err());
+        assert!(r2.is_ok(), "second call failed: {:?}", r2.err());
+
+        // Both should return the same access token.
+        assert_eq!(r1.unwrap()["claudeAiOauth"]["accessToken"], "access_tok");
+        assert_eq!(r2.unwrap()["claudeAiOauth"]["accessToken"], "access_tok");
+    }
 
     // --- apply_token_response tests ---
 
