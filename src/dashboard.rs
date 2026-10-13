@@ -218,27 +218,16 @@ fn codex_usage_result(result: Result<Option<RateLimits>>) -> (Vec<UsageLine>, bo
 }
 
 async fn prefetch_codex_usage(profiles: &[String]) -> UsageCache {
-    // Sync active auth.json to current profile before fetching usage,
-    // analogous to sync_keychain_to_current_profile for Claude.
-    let _ = tokio::task::spawn_blocking(codex::profile::sync_auth_to_current_profile).await;
-
-    let current = Tool::Codex.current_profile().ok().flatten();
-
     let mut handles = Vec::new();
     for p in profiles {
         let p = p.clone();
-        let is_current = current.as_deref() == Some(p.as_str());
         handles.push(tokio::spawn(async move {
-            let result = if is_current {
-                codex::usage::fetch_usage().await
-            } else {
-                async {
-                    let dir = Tool::Codex.profile_dir(&p)?;
-                    let auth_path = dir.join("auth.json");
-                    codex::usage::fetch_usage_from_auth(&auth_path).await
-                }
-                .await
-            };
+            let result = async {
+                let dir = Tool::Codex.profile_dir(&p)?;
+                let auth_path = dir.join("auth.json");
+                codex::usage::fetch_usage_from_auth(&auth_path).await
+            }
+            .await;
             let (usage_lines, is_stale) = codex_usage_result(result);
             (
                 p,
@@ -335,7 +324,11 @@ impl DashboardView<'_> {
         let mut item_idx = 0;
 
         for (tool, profiles, current) in self.tool_profiles {
-            lines.push(tool.to_string());
+            lines.push(if *tool == Tool::Codex {
+                format!("{tool} (next launch: aip codex)")
+            } else {
+                tool.to_string()
+            });
 
             if profiles.is_empty() {
                 lines.push("  (no profiles)".to_string());
@@ -549,8 +542,7 @@ fn handle_dashboard_key(
             }
             Key::Enter | Key::Char(' ') => {
                 let (tool, profile) = &selectable_items[*selected];
-                // Reapplying Codex credentials can repair a failed daemon activation.
-                if *tool != Tool::Codex && is_current_profile(tool_profiles, *tool, profile) {
+                if is_current_profile(tool_profiles, *tool, profile) {
                     return DashboardAction::None;
                 }
                 DashboardAction::Switch(*tool, profile.clone())
@@ -746,8 +738,6 @@ pub async fn cmd_dashboard() -> Result<()> {
                             {
                                 Ok(Ok(())) => break,
                                 Ok(Err(e)) => {
-                                    // Daemon activation may fail after credentials and
-                                    // the current marker have already been changed.
                                     tool_profiles = load_tool_profiles();
                                     status_message = Some(format!(
                                         "Failed to switch profile: {:#}",
@@ -1372,7 +1362,7 @@ mod tests {
     }
 
     #[test]
-    fn handle_dashboard_key_enter_on_current_codex_profile_retries_activation() {
+    fn handle_dashboard_key_enter_on_current_codex_profile_does_nothing() {
         let tool_profiles = vec![(
             Tool::Codex,
             vec!["main".to_string()],
@@ -1388,7 +1378,7 @@ mod tests {
             &mut None,
             &mut DisplayPreference::Default,
         );
-        assert!(matches!(action, DashboardAction::Switch(Tool::Codex, ref p) if p == "main"));
+        assert!(matches!(action, DashboardAction::None));
     }
 
     #[test]

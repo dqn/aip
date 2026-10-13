@@ -75,6 +75,9 @@ impl Tool {
             return Err(anyhow!("profile '{}' does not exist for {}", name, self));
         }
 
+        if *self == Tool::Codex {
+            crate::codex::profile::ensure_stopped(&profile_dir)?;
+        }
         std::fs::remove_dir_all(&profile_dir)?;
 
         // Clean up _order file to remove the deleted profile name.

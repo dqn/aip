@@ -16,12 +16,16 @@ use cli::{Cli, Command};
 use tool::Tool;
 
 fn main() -> Result<()> {
+    let cli = Cli::parse_from(cli::normalize_short_flags(std::env::args_os()));
+    if let Some(Command::Codex { args }) = &cli.command {
+        return codex::profile::launch(args);
+    }
     let rt = tokio::runtime::Runtime::new()?;
     let result = rt.block_on(async {
-        let cli = Cli::parse_from(cli::normalize_short_flags(std::env::args_os()));
         let result = match cli.command {
             None => dashboard::cmd_dashboard().await,
             Some(Command::Save { tool, profile }) => cmd_save(tool, profile),
+            Some(Command::Codex { .. }) => unreachable!("Codex launch runs before starting Tokio"),
         };
         claude::usage::finish_pending_refresh().await;
         result

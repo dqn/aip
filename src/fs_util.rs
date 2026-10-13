@@ -28,10 +28,6 @@ pub fn atomic_write(path: &Path, content: &str) -> Result<()> {
     with_tmp_rename(path, |tmp| fs::write(tmp, content))
 }
 
-pub fn atomic_copy(src: &Path, dst: &Path) -> Result<()> {
-    with_tmp_rename(dst, |tmp| fs::copy(src, tmp).map(|_| ()))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -66,27 +62,5 @@ mod tests {
 
         let tmp_path = path.with_extension("tmp");
         assert!(!tmp_path.exists());
-    }
-
-    #[test]
-    fn atomic_copy_copies_file_correctly() {
-        let dir = tempfile::tempdir().unwrap();
-        let src = dir.path().join("src.txt");
-        let dst = dir.path().join("dst.txt");
-
-        fs::write(&src, "copy me").unwrap();
-        atomic_copy(&src, &dst).unwrap();
-
-        assert_eq!(fs::read_to_string(&dst).unwrap(), "copy me");
-    }
-
-    #[test]
-    fn atomic_copy_fails_for_missing_source() {
-        let dir = tempfile::tempdir().unwrap();
-        let src = dir.path().join("nonexistent.txt");
-        let dst = dir.path().join("dst.txt");
-
-        let result = atomic_copy(&src, &dst);
-        assert!(result.is_err());
     }
 }

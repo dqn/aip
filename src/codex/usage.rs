@@ -1,6 +1,3 @@
-use std::fs;
-#[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
 use anyhow::{Result, anyhow};
@@ -8,16 +5,12 @@ use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use serde_json::Value;
 
-use crate::fs_util;
 use crate::http::shared_client;
-use crate::tool::Tool;
 
 // These constants are reverse-engineered from the Codex CLI binary.
 // They may need updating when the upstream tool changes.
 // Last verified: 2026-02-21
 const USAGE_URL: &str = "https://chatgpt.com/backend-api/wham/usage";
-const TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
-const CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 
 #[derive(Debug, Deserialize)]
 pub struct RateLimits {
@@ -49,15 +42,7 @@ struct UsageResponse {
 #[derive(Debug, Deserialize)]
 struct TokenData {
     access_token: String,
-    refresh_token: Option<String>,
     account_id: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct RefreshResponse {
-    access_token: Option<String>,
-    refresh_token: Option<String>,
-    id_token: Option<String>,
 }
 
 fn read_tokens(raw: &Value) -> Result<TokenData> {
@@ -67,65 +52,31 @@ fn read_tokens(raw: &Value) -> Result<TokenData> {
     Ok(serde_json::from_value(tokens_value.clone())?)
 }
 
-async fn read_auth(path: &Path) -> Result<(Value, TokenData)> {
+async fn fetch_from_auth_path(
+    path: &Path,
+    client: &reqwest::Client,
+    url: &str,
+) -> Result<Option<RateLimits>> {
     let content = tokio::fs::read_to_string(path).await?;
     let raw: Value = serde_json::from_str(&content)?;
     let tokens = read_tokens(&raw)?;
-    Ok((raw, tokens))
-}
-
-async fn do_refresh_token(refresh_token: &str) -> Result<RefreshResponse> {
-    let resp = shared_client()
-        .post(TOKEN_URL)
-        .json(&serde_json::json!({
-            "client_id": CLIENT_ID,
-            "grant_type": "refresh_token",
-            "refresh_token": refresh_token,
-            "scope": "openid profile email",
-        }))
-        .send()
-        .await?;
-
-    if !resp.status().is_success() {
-        return Err(anyhow!(
-            "token refresh failed ({}): {}",
-            resp.status(),
-            resp.text().await.unwrap_or_default()
-        ));
-    }
-
-    Ok(resp.json().await?)
-}
-
-fn apply_refresh(raw: &mut Value, resp: &RefreshResponse) -> Result<()> {
-    let tokens = raw
-        .get_mut("tokens")
-        .ok_or_else(|| anyhow!("malformed auth.json: missing 'tokens' key"))?;
-    if let Some(new_access) = &resp.access_token {
-        tokens["access_token"] = Value::String(new_access.clone());
-    }
-    if let Some(new_refresh) = &resp.refresh_token {
-        tokens["refresh_token"] = Value::String(new_refresh.clone());
-    }
-    if let Some(new_id) = &resp.id_token {
-        tokens["id_token"] = Value::String(new_id.clone());
-    }
-    Ok(())
-}
-
-async fn fetch_usage_api(tokens: &TokenData) -> Result<reqwest::Response> {
-    let mut req = shared_client()
-        .get(USAGE_URL)
+    let mut request = client
+        .get(url)
         .header("Authorization", format!("Bearer {}", tokens.access_token));
-
-    if let Some(account_id) = &tokens.account_id {
-        req = req.header("ChatGPT-Account-Id", account_id);
+    if let Some(id) = tokens.account_id {
+        request = request.header("ChatGPT-Account-Id", id);
     }
-
-    Ok(req.send().await?)
+    // Codex owns refresh for every running profile, including deselected ones.
+    // Monitoring must never rotate or overwrite those credentials.
+    parse_usage_response(request.send().await?).await
 }
 
 async fn parse_usage_response(resp: reqwest::Response) -> Result<Option<RateLimits>> {
+    if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
+        return Err(anyhow!(
+            "Codex credentials expired; launch this profile with 'aip codex' to refresh them"
+        ));
+    }
     if !resp.status().is_success() {
         return Err(anyhow!(
             "usage API returned status {}: {}",
@@ -137,62 +88,8 @@ async fn parse_usage_response(resp: reqwest::Response) -> Result<Option<RateLimi
     Ok(usage.rate_limit)
 }
 
-async fn fetch_from_auth_path(path: &Path) -> Result<Option<RateLimits>> {
-    let (mut raw, tokens) = read_auth(path).await?;
-
-    let resp = fetch_usage_api(&tokens).await?;
-
-    match resp.status() {
-        reqwest::StatusCode::UNAUTHORIZED => {}
-        _ => return parse_usage_response(resp).await,
-    }
-
-    // Token expired, try refreshing
-    let refresh_token = tokens
-        .refresh_token
-        .as_deref()
-        .ok_or_else(|| anyhow!("auth.json does not contain a refresh_token"))?;
-    let refresh_resp = do_refresh_token(refresh_token).await?;
-    apply_refresh(&mut raw, &refresh_resp)?;
-
-    let new_access_token = refresh_resp
-        .access_token
-        .as_deref()
-        .ok_or_else(|| anyhow!("token refresh returned no new access token"))?;
-    if new_access_token == tokens.access_token {
-        return Err(anyhow!("token refresh returned the same access token"));
-    }
-
-    let path = path.to_owned();
-    let serialized = serde_json::to_string_pretty(&raw)?;
-    tokio::task::spawn_blocking(move || {
-        fs_util::atomic_write(&path, &serialized)?;
-        #[cfg(unix)]
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
-        Ok::<(), anyhow::Error>(())
-    })
-    .await??;
-
-    let new_tokens = read_tokens(&raw)?;
-    let resp = fetch_usage_api(&new_tokens).await?;
-    parse_usage_response(resp).await
-}
-
-pub async fn fetch_usage() -> Result<Option<RateLimits>> {
-    let path = Tool::Codex.home_dir()?.join("auth.json");
-    match fetch_from_auth_path(&path).await {
-        Err(e)
-            if e.downcast_ref::<std::io::Error>()
-                .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound) =>
-        {
-            Ok(None)
-        }
-        other => other,
-    }
-}
-
 pub async fn fetch_usage_from_auth(path: &Path) -> Result<Option<RateLimits>> {
-    match fetch_from_auth_path(path).await {
+    match fetch_from_auth_path(path, shared_client(), USAGE_URL).await {
         Err(e)
             if e.downcast_ref::<std::io::Error>()
                 .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound) =>
@@ -207,6 +104,50 @@ pub async fn fetch_usage_from_auth(path: &Path) -> Result<Option<RateLimits>> {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn expired_usage_does_not_refresh_or_write_auth() {
+        use std::io::{Read, Write};
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join("auth.json");
+        let contents = r#"{"tokens":{"access_token":"usage-sentinel","refresh_token":"refresh-sentinel","account_id":"old-account"}}"#;
+        std::fs::write(&path, contents).unwrap();
+        let server = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = server.local_addr().unwrap();
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = server.accept().unwrap();
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                .unwrap();
+            let mut request_bytes = Vec::new();
+            let mut buffer = [0u8; 2048];
+            while !request_bytes.windows(4).any(|part| part == b"\r\n\r\n") {
+                let size = stream.read(&mut buffer).unwrap();
+                assert!(size > 0);
+                request_bytes.extend_from_slice(&buffer[..size]);
+            }
+            let request = String::from_utf8_lossy(&request_bytes).to_lowercase();
+            assert!(request.starts_with("get /usage "));
+            assert!(request.contains("authorization: bearer usage-sentinel"));
+            assert!(request.contains("chatgpt-account-id: old-account"));
+            stream
+                .write_all(
+                    b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .unwrap();
+        });
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let result = fetch_from_auth_path(&path, &client, &format!("http://{address}/usage")).await;
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("launch this profile")
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), contents);
+        assert!(!path.with_extension("tmp").exists());
+        handle.join().unwrap();
+    }
+
     #[test]
     fn read_tokens_with_refresh_token() {
         let raw: Value = serde_json::json!({
@@ -217,7 +158,6 @@ mod tests {
         });
         let tokens = read_tokens(&raw).unwrap();
         assert_eq!(tokens.access_token, "acc");
-        assert_eq!(tokens.refresh_token.as_deref(), Some("ref"));
     }
 
     #[test]
@@ -229,7 +169,6 @@ mod tests {
         });
         let tokens = read_tokens(&raw).unwrap();
         assert_eq!(tokens.access_token, "acc");
-        assert!(tokens.refresh_token.is_none());
     }
 
     #[test]
@@ -247,21 +186,6 @@ mod tests {
         let raw: Value = serde_json::json!({});
         let err = read_tokens(&raw).unwrap_err();
         assert!(err.to_string().contains("no tokens in auth.json"));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn atomic_write_with_permissions_sets_0o600() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("auth.json");
-
-        fs_util::atomic_write(&path, r#"{"tokens":{}}"#).unwrap();
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
-
-        let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode, 0o600, "credential file should be owner-only (0o600)");
     }
 
     #[test]

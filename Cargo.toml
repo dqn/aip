@@ -17,7 +17,6 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = "1"
-base64 = "0.22"
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive", "env"] }
 console = "0.15"
@@ -25,8 +24,10 @@ dialoguer = "0.11"
 dirs = "6"
 fd-lock = "4"
 reqwest = { version = "0.12", features = ["json"] }
+ring = "0.17"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "fs", "signal"] }
-tungstenite = "0.28"
+
+[dev-dependencies]
 tempfile = "3"

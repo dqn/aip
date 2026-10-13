@@ -30,6 +30,13 @@ where
 
 #[derive(Subcommand)]
 pub enum Command {
+    /// Launch Codex using the selected account without interrupting other sessions
+    #[command(disable_help_flag = true, disable_version_flag = true)]
+    Codex {
+        /// Arguments passed directly to Codex
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<OsString>,
+    },
     /// Save current credentials as a new profile
     Save {
         /// Tool name (claude or codex)
@@ -42,6 +49,28 @@ pub enum Command {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn codex_launch_accepts_native_arguments() {
+        let cli = Cli::try_parse_from(["aip", "codex", "resume", "--last", "--model", "example"])
+            .unwrap();
+        assert!(
+            matches!(cli.command, Some(Command::Codex { args }) if args == ["resume", "--last", "--model", "example"])
+        );
+    }
+
+    #[test]
+    fn codex_help_version_and_separator_are_forwarded() {
+        for flag in ["--help", "--version", "-h", "-v"] {
+            let cli = Cli::try_parse_from(normalize_short_flags(["aip", "codex", flag])).unwrap();
+            assert!(matches!(cli.command, Some(Command::Codex { args }) if args == [flag]));
+        }
+        let cli =
+            Cli::try_parse_from(["aip", "codex", "--", "exec", "a prompt with spaces"]).unwrap();
+        assert!(
+            matches!(cli.command, Some(Command::Codex { args }) if args == ["exec", "a prompt with spaces"])
+        );
+    }
 
     #[test]
     fn version_long_option_displays_version() {
