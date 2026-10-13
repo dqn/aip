@@ -549,7 +549,8 @@ fn handle_dashboard_key(
             }
             Key::Enter | Key::Char(' ') => {
                 let (tool, profile) = &selectable_items[*selected];
-                if is_current_profile(tool_profiles, *tool, profile) {
+                // Reapplying Codex credentials can repair a failed daemon activation.
+                if *tool != Tool::Codex && is_current_profile(tool_profiles, *tool, profile) {
                     return DashboardAction::None;
                 }
                 DashboardAction::Switch(*tool, profile.clone())
@@ -644,14 +645,14 @@ pub async fn cmd_dashboard() -> Result<()> {
 
     loop {
         status_message = None;
-        let tool_profiles = load_tool_profiles();
-        let codex_profiles = get_codex_profiles(&tool_profiles);
+        let mut tool_profiles = load_tool_profiles();
+        let codex_profiles = get_codex_profiles(&tool_profiles).to_vec();
         let selectable_items = build_selectable_items(&tool_profiles);
 
         selected = selected.min(selectable_items.len().saturating_sub(1));
 
         let claude_future = prefetch_claude_usage();
-        let codex_future = prefetch_codex_usage(codex_profiles);
+        let codex_future = prefetch_codex_usage(&codex_profiles);
         tokio::pin!(claude_future);
         tokio::pin!(codex_future);
 
@@ -745,8 +746,11 @@ pub async fn cmd_dashboard() -> Result<()> {
                             {
                                 Ok(Ok(())) => break,
                                 Ok(Err(e)) => {
+                                    // Daemon activation may fail after credentials and
+                                    // the current marker have already been changed.
+                                    tool_profiles = load_tool_profiles();
                                     status_message = Some(format!(
-                                        "Failed to switch profile: {}",
+                                        "Failed to switch profile: {:#}",
                                         e,
                                     ));
                                     should_render = true;
@@ -1365,6 +1369,26 @@ mod tests {
             &mut DisplayPreference::Default,
         );
         assert!(matches!(action, DashboardAction::Switch(Tool::Claude, ref p) if p == "work"));
+    }
+
+    #[test]
+    fn handle_dashboard_key_enter_on_current_codex_profile_retries_activation() {
+        let tool_profiles = vec![(
+            Tool::Codex,
+            vec!["main".to_string()],
+            Some("main".to_string()),
+        )];
+        let selectable_items = build_selectable_items(&tool_profiles);
+        let action = handle_dashboard_key(
+            Key::Enter,
+            &mut 0,
+            &mut DashboardMode::Normal,
+            &selectable_items,
+            &tool_profiles,
+            &mut None,
+            &mut DisplayPreference::Default,
+        );
+        assert!(matches!(action, DashboardAction::Switch(Tool::Codex, ref p) if p == "main"));
     }
 
     #[test]

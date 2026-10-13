@@ -57,6 +57,8 @@ aip -v, aip --version  # show aip version
 
 - `aip` (without subcommands) starts the interactive dashboard with profile switching, deletion, and live usage monitor.
 - Switching profiles performs a safety sync check to avoid overwriting mismatched credentials.
+- Switching a Codex profile restarts an existing managed app-server daemon and verifies its active ChatGPT account. This interrupts clients connected to that daemon; reconnect or resume them afterward. If no daemon is present, switching only updates the credentials file.
+- If daemon activation fails after the credentials were copied, aip reports the partial failure. Select the same Codex profile again to retry. Verification requires a ChatGPT profile with an account ID; API-key profiles cannot be activated through this daemon workflow.
 - Usage display semantics differ by tool.
 - Claude shows percentage as **used**.
 - Codex shows percentage as **left**.
